@@ -17,8 +17,8 @@ API_TOKEN = "8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc"
 ADMIN_ID = 1262656649
 MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT"
 
-# ضع الرابط الذي نسخته من جوجل هنا (بين علامتي التنصيص)
-SHEET_WEBHOOK_URL = os.environ.get("SHEET_WEBHOOK_URL", "ضع_رابط_جوجل_هنا_إن_وجد")
+# رابط جوجل شيت لتسجيل الفواتير والأرباح الذي قمت بإنشائه
+SHEET_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbzPrw8oANq8Aek6O6URoTU0kDVjb1ZtoVdYkhpqAqM6Nuws4ZmcPRC9JtoNZvWoMzUb/exec"
 
 bot = telebot.TeleBot(API_TOKEN)
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
@@ -73,7 +73,7 @@ def find_customer(text):
     # 2. البحث برقم الهاتف (تنظيف الرقم من الفراغات والبلس والأصفار)
     clean_phone = text.replace("+", "").replace(" ", "").lstrip("0")
     if clean_phone:
-        u = users.find_one({"phone": {"$regex": f"{clean_phone}$"}}) # يبحث عن أي رقم ينتهي بهذا التسلسل
+        u = users.find_one({"phone": {"$regex": f"{clean_phone}$"}}) 
         if u: return u
     return None
 
@@ -238,7 +238,7 @@ def buy(call):
         "price": item["price"], "cost": cost_price, "profit": profit, "date": dt_now
     })
 
-    # الإرسال لجوجل شيت إذا كان الرابط موجوداً
+    # الإرسال لجوجل شيت
     if SHEET_WEBHOOK_URL and SHEET_WEBHOOK_URL.startswith("http"):
         try:
             requests.post(SHEET_WEBHOOK_URL, json={
@@ -328,7 +328,6 @@ def save_product(msg):
     if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     try:
         lines = msg.text.split("\n")
-        # التنسيق الجديد يحتوي على 5 عناصر
         cat, sub, name, price, cost = lines[0].split(":")
         price = int(price.strip())
         cost = int(cost.strip())
