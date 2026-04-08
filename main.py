@@ -1,144 +1,208 @@
 import telebot
 from telebot import types
-import json
-import os
+from pymongo import MongoClient
 import random
 import string
+import datetime
 
-# --- الإعدادات ---
+# --- الإعدادات الأساسية ---
+# توكن البوت الخاص بك
 API_TOKEN = '8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc'
-ADMIN_ID = 1262656649  # تم وضع رقمك كمدير
+
+# رابط الاتصال بقاعدة بيانات MongoDB (تأكد من وضع رابطك الصحيح هنا)
+MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT"
+
+# معرف المدير (أنت)
+ADMIN_ID = 1262656649
+
+# تهيئة البوت وقاعدة البيانات
 bot = telebot.TeleBot(API_TOKEN)
-DATA_FILE = 'store_data.json'
+client = MongoClient(MONGO_URI)
+db = client['StoreDB']
+users_col = db['users']
+cards_col = db['topup_cards']
+stock_col = db['stock']
+sales_col = db['sales']
 
-# --- إدارة البيانات ---
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {"users": {}, "topup_cards": {}, "stock": {}, "sales": []}
-    with open(DATA_FILE, 'r', encoding='utf-8') as f:
-        try:
-            return json.load(f)
-        except:
-            return {"users": {}, "topup_cards": {}, "stock": {}, "sales": []}
+# --- لوحات المفاتيح (أزرار التحكم) ---
 
-def save_data(data):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
-# --- لوحات المفاتيح ---
 def main_menu():
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    markup.add("👤 حسابي", "🛒 شراء كود", "💳 شحن رصيد")
+    markup.add(
+        types.KeyboardButton("🛒 شراء كود"),
+        types.KeyboardButton("💳 شحن رصيد"),
+        types.KeyboardButton("👤 حسابي"),
+        types.KeyboardButton("📢 الدعم الفني")
+    )
     return markup
 
 # --- الأوامر الأساسية ---
+
 @bot.message_handler(commands=['start'])
 def start(message):
-    data = load_data()
-    uid = str(message.chat.id)
-    if uid not in data['users']:
+    uid = message.chat.id
+    user = users_col.find_one({"_id": uid})
+    
+    if not user:
         markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
         markup.add(types.KeyboardButton("📱 تسجيل الحساب برقم الهاتف", request_contact=True))
-        bot.send_message(uid, "مرحباً بك في متجرك! يرجى التسجيل للمتابعة:", reply_markup=markup)
+        bot.send_message(uid, "مرحباً بك في متجر ATTGIFT! يرجى التسجيل للمتابعة:", reply_markup=markup)
     else:
-        bot.send_message(uid, "مرحباً بك مجدداً!", reply_markup=main_menu())
+        bot.send_message(uid, f"أهلاً بك مجدداً!\nرصيدك الحالي: {user['balance']} د.ل", reply_markup=main_menu())
 
 @bot.message_handler(content_types=['contact'])
 def handle_contact(message):
-    data = load_data()
-    uid = str(message.chat.id)
+    uid = message.chat.id
     if message.contact:
-        data['users'][uid] = {"phone": message.contact.phone_number, "balance": 0}
-        save_data(data)
-        bot.send_message(uid, "✅ تم التسجيل بنجاح!", reply_markup=main_menu())
+        # إنشاء مستخدم جديد في قاعدة البيانات
+        user_data = {
+            "_id": uid,
+            "phone": message.contact.phone_number,
+            "balance": 0,
+            "join_date": str(datetime.datetime.now())
+        }
+        users_col.update_one({"_id": uid}, {"$set": user_data}, upsert=True)
+        bot.send_message(uid, "✅ تم تسجيل حسابك بنجاح في قاعدة البيانات السحابية!", reply_markup=main_menu())
 
-# --- لوحة الإدارة (فقط لك) ---
+# --- لوحة الإدارة (للمدير فقط) ---
+
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     if message.chat.id != ADMIN_ID:
         return
+    
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("➕ إضافة بضاعة (أكواد)", callback_data="add_stock"))
-    markup.add(types.InlineKeyboardButton("🎫 توليد كرت شحن محفظة", callback_data="gen_topup"))
-    markup.add(types.InlineKeyboardButton("📊 عرض المخزن", callback_data="view_stock"))
-    bot.send_message(ADMIN_ID, "🛠 لوحة إدارة المتجر:", reply_markup=markup)
+    markup.add(types.InlineKeyboardButton("➕ إضافة بضاعة (أكواد للبيع)", callback_data="add_stock"))
+    markup.add(types.InlineKeyboardButton("🎫 توليد كرت شحن (للمحفظة)", callback_data="gen_topup"))
+    markup.add(types.InlineKeyboardButton("📦 عرض المخزن الحالي", callback_data="view_stock"))
+    markup.add(types.InlineKeyboardButton("👥 إحصائيات المستخدمين", callback_data="user_stats"))
+    
+    bot.send_message(ADMIN_ID, "🛠 لوحة إدارة المتجر (السحابية):", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
-def handle_query(call):
+def handle_admin_queries(call):
     if call.data == "gen_topup":
-        data = load_data()
+        # توليد كود شحن محفظة بقيمة 10 دينار (كمثال)
         new_code = "GIFT-" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-        data['topup_cards'][new_code] = 10  # القيمة الافتراضية 10
-        save_data(data)
-        bot.send_message(ADMIN_ID, f"🎫 كرت شحن جديد (10 د.ل):\n`{new_code}`", parse_mode="Markdown")
+        cards_col.insert_one({"code": new_code, "value": 10})
+        bot.send_message(ADMIN_ID, f"🎫 كرت شحن جديد بقيمة 10 د.ل:\n`{new_code}`", parse_mode="Markdown")
     
     elif call.data == "add_stock":
-        msg = bot.send_message(ADMIN_ID, "أرسل تفاصيل المنتج بهذا التنسيق حصراً:\n\nالاسم : السعر : الكود\n\nمثال:\nببجي 60 : 5 : ABCD-1234")
+        msg = bot.send_message(ADMIN_ID, "يرجى إرسال تفاصيل الكود بالتنسيق التالي:\n\nالاسم : السعر : الكود\n\nمثال:\nببجي 60 شدة : 5 : ABCD-1234")
         bot.register_next_step_handler(msg, process_add_stock)
     
     elif call.data == "view_stock":
-        data = load_data()
-        text = "📦 المخزن الحالي:\n"
-        for cat, items in data['stock'].items():
-            text += f"- {cat}: {len(items)} قطعة متبقية\n"
-        bot.send_message(ADMIN_ID, text if data['stock'] else "المخزن فارغ!")
+        items = list(stock_col.find())
+        if not items:
+            bot.send_message(ADMIN_ID, "📦 المخزن فارغ حالياً.")
+        else:
+            report = "📦 حالة المخزن:\n"
+            counts = {}
+            for i in items:
+                counts[i['name']] = counts.get(i['name'], 0) + 1
+            for name, count in counts.items():
+                report += f"- {name}: متوفر ({count}) قطع\n"
+            bot.send_message(ADMIN_ID, report)
+
+    elif call.data == "user_stats":
+        count = users_col.count_documents({})
+        bot.send_message(ADMIN_ID, f"👥 عدد المشتركين المسجلين: {count}")
 
 def process_add_stock(message):
     try:
-        parts = message.text.split(":")
-        name = parts[0].strip()
-        price = int(parts[1].strip())
-        secret = parts[2].strip()
+        # تقسيم الرسالة بناءً على النقطتين :
+        parts = [p.strip() for p in message.text.split(":")]
+        if len(parts) != 3:
+            raise ValueError
         
-        data = load_data()
-        if name not in data['stock']: data['stock'][name] = []
-        data['stock'][name].append({"secret": secret, "price": price})
-        save_data(data)
-        bot.send_message(ADMIN_ID, f"✅ تم إضافة المنتج: {name}\nالسعر: {price}\nالكود: {secret}")
-    except:
-        bot.send_message(ADMIN_ID, "❌ خطأ في التنسيق! حاول مجدداً من لوحة الإدارة.")
+        name, price, secret = parts[0], int(parts[1]), parts[2]
+        
+        # إضافة الكود للمخزن في MongoDB
+        stock_col.insert_one({
+            "name": name,
+            "price": price,
+            "secret": secret,
+            "added_at": str(datetime.datetime.now())
+        })
+        bot.send_message(ADMIN_ID, f"✅ تم إضافة المنتج بنجاح:\nالمنتج: {name}\nالسعر: {price} د.ل")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, "❌ خطأ في التنسيق! يرجى المحاولة مرة أخرى والتأكد من استخدام النقطتين `:` للفصل بين البيانات.")
 
-# --- نظام الشحن والشراء للزبون ---
+# --- وظائف المستخدم (الشحن والشراء) ---
+
 @bot.message_handler(func=lambda m: m.text == "💳 شحن رصيد")
-def ask_recharge(message):
-    msg = bot.send_message(message.chat.id, "أدخل كود الشحن الخاص بك:")
-    bot.register_next_step_handler(msg, do_recharge)
+def recharge_request(message):
+    msg = bot.send_message(message.chat.id, "أدخل كود الشحن الذي حصلت عليه من الإدارة:")
+    bot.register_next_step_handler(msg, process_user_recharge)
 
-def do_recharge(message):
-    data = load_data()
+def process_user_recharge(message):
     code = message.text.strip()
-    uid = str(message.chat.id)
-    if code in data['topup_cards']:
-        val = data['topup_cards'].pop(code)
-        data['users'][uid]['balance'] += val
-        save_data(data)
-        bot.send_message(uid, f"✅ تم شحن {val} د.ل بنجاح!")
+    uid = message.chat.id
+    
+    # البحث عن الكود وحذفه فوراً لضمان عدم استخدامه مرتين
+    card = cards_col.find_one_and_delete({"code": code})
+    
+    if card:
+        amount = card['value']
+        users_col.update_one({"_id": uid}, {"$inc": {"balance": amount}})
+        bot.send_message(uid, f"✅ تم شحن محفظتك بنجاح بـ {amount} د.ل!")
     else:
-        bot.send_message(uid, "❌ كود خاطئ.")
+        bot.send_message(uid, "❌ كود الشحن غير صحيح أو تم استخدامه من قبل.")
 
 @bot.message_handler(func=lambda m: m.text == "🛒 شراء كود")
-def shop(message):
-    data = load_data()
-    if not data['stock']: return bot.send_message(message.chat.id, "المتجر فارغ حالياً.")
+def shop_menu(message):
+    # جلب أسماء المنتجات الفريدة المتوفرة في المخزن
+    products = stock_col.distinct("name")
+    
+    if not products:
+        bot.send_message(message.chat.id, "نعتذر، لا توجد منتجات متوفرة حالياً في المتجر.")
+        return
+
     markup = types.InlineKeyboardMarkup()
-    for cat in data['stock'].keys():
-        if data['stock'][cat]:
-            price = data['stock'][cat][0]['price']
-            markup.add(types.InlineKeyboardButton(f"{cat} ({price} د.ل)", callback_data=f"buy_{cat}"))
-    bot.send_message(message.chat.id, "اختر المنتج:", reply_markup=markup)
+    for p_name in products:
+        # جلب أول قطعة متوفرة لمعرفة السعر
+        sample_item = stock_col.find_one({"name": p_name})
+        markup.add(types.InlineKeyboardButton(f"{p_name} - {sample_item['price']} د.ل", callback_data=f"buy_{p_name}"))
+    
+    bot.send_message(message.chat.id, "اختر المنتج الذي ترغب في شرائه:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
-def process_buy(call):
-    data = load_data()
-    uid = str(call.message.chat.id)
-    cat = call.data.split("_")[1]
+def finalize_purchase(call):
+    p_name = call.data.split("_")[1]
+    uid = call.message.chat.id
     
-    if data['users'][uid]['balance'] >= data['stock'][cat][0]['price']:
-        item = data['stock'][cat].pop(0)
-        data['users'][uid]['balance'] -= item['price']
-        save_data(data)
-        bot.send_message(uid, f"✅ تم الشراء!\nكود المنتج:\n`{item['secret']}`", parse_mode="Markdown")
-    else:
-        bot.answer_callback_query(call.id, "❌ رصيدك غير كافٍ!", show_alert=True)
+    user = users_col.find_one({"_id": uid})
+    # جلب أول كود متاح في المخزن لهذا المنتج
+    item = stock_col.find_one({"name": p_name})
+    
+    if not item:
+        bot.answer_callback_query(call.id, "نعتذر، نفدت الكمية من هذا المنتج!")
+        return
 
+    if user['balance'] >= item['price']:
+        # خصم الرصيد وحذف الكود من المخزن
+        users_col.update_one({"_id": uid}, {"$inc": {"balance": -item['price']}})
+        stock_col.delete_one({"_id": item['_id']})
+        
+        # إرسال الكود للزبون
+        bot.send_message(uid, f"✅ تمت عملية الشراء بنجاح!\n\nمنتجك: {p_name}\nكود التفعيل: `{item['secret']}`\n\nشكراً لتعاملك معنا!", parse_mode="Markdown")
+        
+        # إشعار للمدير
+        bot.send_message(ADMIN_ID, f"🔔 عملية بيع جديدة:\nالمستخدم: {uid}\nالمنتج: {p_name}\nالسعر: {item['price']}")
+    else:
+        bot.answer_callback_query(call.id, "❌ رصيدك غير كافٍ! يرجى شحن المحفظة أولاً.", show_alert=True)
+
+@bot.message_handler(func=lambda m: m.text == "👤 حسابي")
+def profile(message):
+    user = users_col.find_one({"_id": message.chat.id})
+    if user:
+        text = f"👤 **معلومات حسابك**\n\n📱 الرقم: `{user['phone']}`\n💰 الرصيد: `{user['balance']}` د.ل\n🆔 المعرف: `{user['_id']}`"
+        bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+@bot.message_handler(func=lambda m: m.text == "📢 الدعم الفني")
+def support(message):
+    bot.send_message(message.chat.id, "للتواصل مع الإدارة مباشرة:\n@حساب_الدعم_الخاص_بك")
+
+# تشغيل البوت بشكل مستمر
+print("--- البوت الآن متصل بقاعدة بيانات MongoDB وهو يعمل ---")
 bot.infinity_polling()
