@@ -3,115 +3,106 @@ from telebot import types
 from pymongo import MongoClient
 from bson import ObjectId
 import datetime
-import os
 import certifi
-import random
-import string
-from flask import Flask
-from threading import Thread
-import logging
+from flask import Flask, request
 import time
 
-# --- Flask ---
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot Running ✅"
-
-@app.route('/stats')
-def stats():
-    total_users = users_col.count_documents({})
-    total_balance = sum(u.get('balance', 0) for u in users_col.find())
-    return {"users": total_users, "balance": total_balance}
-
-def run_flask():
-    port = int(os.environ.get('PORT', 10000))
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
-    app.run(host='0.0.0.0', port=port)
-
-# --- CONFIG ---
+# ================= CONFIG =================
 API_TOKEN = '8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc'
 MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT"
 ADMIN_ID = 1262656649
 
 bot = telebot.TeleBot(API_TOKEN)
 
+# ================= DATABASE =================
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client['AlAhram_DB']
-users_col = db['users']
-cards_col = db['topup_cards']
-stock_col = db['stock']
-logs_col = db['logs']
 
-# --- HELPERS ---
-def get_menu():
+users_col = db['users']
+stock_col = db['stock']
+orders_col = db['orders']
+
+# ================= FLASK =================
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running ✅"
+
+@app.route(f"/{API_TOKEN}", methods=["POST"])
+def webhook():
+    json_str = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "ok", 200
+
+# ================= HELPERS =================
+def main_menu():
     m = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    m.add("🛒 شراء كود", "💳 شحن")
-    m.add("👤 حسابي")
+    m.add("🛒 شراء كود", "👤 حسابي")
     return m
 
-# --- START + REF ---
+def notify_admin(text):
+    try:
+        bot.send_message(ADMIN_ID, text)
+    except:
+        pass
+
+def create_order(uid, item):
+    orders_col.insert_one({
+        "uid": uid,
+        "item": item['name'],
+        "price": item['price'],
+        "code": item['code'],
+        "date": datetime.datetime.now()
+    })
+
+# ================= START =================
 @bot.message_handler(commands=['start'])
 def start(msg):
     uid = msg.chat.id
-    ref = msg.text.split()[1] if len(msg.text.split()) > 1 else None
-
     user = users_col.find_one({"_id": uid})
 
     if not user:
         users_col.insert_one({
             "_id": uid,
             "balance": 0,
-            "status": "active",
-            "ref_by": int(ref) if ref else None,
+            "points": 0,
             "join_date": datetime.datetime.now()
         })
 
-        if ref:
-            users_col.update_one({"_id": int(ref)}, {"$inc": {"balance": 1}})
+    bot.send_message(uid, "أهلاً بك 👋", reply_markup=main_menu())
 
-        bot.send_message(uid, "تم التسجيل ✅", reply_markup=get_menu())
-    else:
-        bot.send_message(uid, "أهلاً بك", reply_markup=get_menu())
-
-# --- CHARGE ---
-@bot.message_handler(func=lambda m: m.text == "💳 شحن")
-def charge(msg):
-    bot.send_message(msg.chat.id, "أرسل الكود")
-    bot.register_next_step_handler(msg, check_card)
-
-def check_card(msg):
-    uid = msg.chat.id
-    code = msg.text.strip()
-
-    card = cards_col.find_one_and_update(
-        {"code": code, "used": False},
-        {"$set": {"used": True, "by": uid, "at": datetime.datetime.now()}}
+# ================= ACCOUNT =================
+@bot.message_handler(func=lambda m: m.text == "👤 حسابي")
+def account(msg):
+    u = users_col.find_one({"_id": msg.chat.id})
+    bot.send_message(msg.chat.id,
+        f"💰 رصيدك: {u.get('balance',0)}\n🎯 نقاطك: {u.get('points',0)}"
     )
 
-    if card:
-        users_col.update_one({"_id": uid}, {"$inc": {"balance": card['val']}})
-        bot.send_message(uid, f"تم الشحن {card['val']} ✅")
-    else:
-        bot.send_message(uid, "كود خطأ ❌")
-
-# --- SHOP ---
+# ================= SHOP =================
 @bot.message_handler(func=lambda m: m.text == "🛒 شراء كود")
 def shop(msg):
     items = list(stock_col.find({"sold": False}))
 
+    if not items:
+        return bot.send_message(msg.chat.id, "⚠️ لا يوجد منتجات حالياً")
+
     for item in items:
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("شراء", callback_data=f"buy_{item['_id']}"))
+        kb.add(types.InlineKeyboardButton(
+            f"شراء {item['price']} د.ل",
+            callback_data=f"buy_{item['_id']}"
+        ))
 
-        bot.send_message(msg.chat.id,
-            f"{item['name']}\n💰 {item['price']}",
+        bot.send_message(
+            msg.chat.id,
+            f"📦 {item['name']}\n💰 السعر: {item['price']}",
             reply_markup=kb
         )
 
-# --- BUY (FIXED RACE CONDITION) ---
+# ================= BUY (SAFE) =================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
 def buy(call):
     uid = call.message.chat.id
@@ -121,69 +112,51 @@ def buy(call):
 
     item = stock_col.find_one_and_update(
         {"_id": ObjectId(pid), "sold": False},
-        {"$set": {"sold": True, "buyer": uid, "date": datetime.datetime.now()}}
+        {"$set": {"sold": True, "buyer": uid}}
     )
 
     if not item:
-        return bot.answer_callback_query(call.id, "انتهى ❌")
+        return bot.answer_callback_query(call.id, "❌ المنتج انتهى")
 
     if user['balance'] < item['price']:
         stock_col.update_one({"_id": item['_id']}, {"$set": {"sold": False}})
-        return bot.answer_callback_query(call.id, "رصيدك لا يكفي ❌")
+        return bot.answer_callback_query(call.id, "❌ رصيدك لا يكفي")
 
+    # خصم الرصيد
     users_col.update_one({"_id": uid}, {"$inc": {"balance": -item['price']}})
 
-    logs_col.insert_one({
-        "uid": uid,
-        "type": "buy",
-        "price": item['price'],
-        "cost_price": item.get('cost_price', 0),
-        "date": datetime.datetime.now()
-    })
+    # نقاط
+    points = int(item['price'] / 10)
+    users_col.update_one({"_id": uid}, {"$inc": {"points": points}})
 
-    bot.send_message(uid, f"الكود:\n{item['code']}")
+    # طلب
+    create_order(uid, item)
 
-# --- ACCOUNT ---
-@bot.message_handler(func=lambda m: m.text == "👤 حسابي")
-def acc(msg):
-    u = users_col.find_one({"_id": msg.chat.id})
-    bot.send_message(msg.chat.id, f"رصيدك: {u.get('balance',0)}")
+    # إشعار أدمن
+    notify_admin(f"🛒 طلب جديد\n👤 {uid}\n📦 {item['name']}\n💰 {item['price']}")
 
-# --- ADMIN REPORT ---
-@bot.message_handler(commands=['report'])
-def report(msg):
-    if msg.chat.id != ADMIN_ID:
-        return
+    bot.send_message(uid, f"✅ تم الشراء\n🎫 الكود:\n{item['code']}")
+    bot.answer_callback_query(call.id, "تم الشراء")
 
-    pipeline = [
-        {"$match": {"type": "buy"}},
-        {"$group": {
-            "_id": None,
-            "sales": {"$sum": "$price"},
-            "costs": {"$sum": "$cost_price"},
-            "count": {"$sum": 1}
-        }}
-    ]
+# ================= SMART REPLY =================
+@bot.message_handler(func=lambda m: True)
+def smart(msg):
+    text = msg.text.lower()
 
-    data = list(logs_col.aggregate(pipeline))
-    stats = data[0] if data else {"sales": 0, "costs": 0, "count": 0}
+    if "مرحبا" in text:
+        bot.reply_to(msg, "أهلاً بك 👋")
+    elif "دعم" in text:
+        bot.reply_to(msg, "📞 تواصل مع الدعم من القائمة")
 
-    profit = stats["sales"] - stats["costs"]
+# ================= WEBHOOK SET =================
+def set_webhook():
+    bot.remove_webhook()
+    time.sleep(2)
 
-    bot.send_message(msg.chat.id,
-        f"📊 عمليات: {stats['count']}\n"
-        f"💰 مبيعات: {stats['sales']}\n"
-        f"💵 ربح: {profit}"
-    )
+    url = "https://attgift-bot.onrender.com" + API_TOKEN
+    bot.set_webhook(url=url)
 
-# --- RUN ---
-def run_bot():
-    while True:
-        try:
-            bot.infinity_polling()
-        except:
-            time.sleep(5)
-
+# ================= RUN =================
 if __name__ == "__main__":
-    Thread(target=run_bot).start()
-    run_flask()
+    set_webhook()
+    app.run(host="0.0.0.0", port=10000)
