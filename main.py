@@ -57,6 +57,9 @@ def get_main_menu():
     markup.add("👤 حسابي", "📢 الدعم الفني")
     return markup
 
+def format_price(price):
+    return int(price) if float(price).is_integer() else price
+
 # --- 4. معالجة أوامر المستخدمين ---
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -68,7 +71,7 @@ def start(message):
         bot.send_message(uid, "🔹 مرحباً بك في شركة الأهرام للاتصالات والتقنية\nيرجى مشاركة جهة الاتصال لتسجيل حسابك:", reply_markup=markup)
     else:
         if is_account_active(uid):
-            bot.send_message(uid, f"أهلاً بك مجدداً!\nرصيدك الحالي: {user.get('balance', 0)} د.ل", reply_markup=get_main_menu())
+            bot.send_message(uid, f"أهلاً بك مجدداً!\nرصيدك الحالي: {format_price(user.get('balance', 0))} د.ل", reply_markup=get_main_menu())
 
 @bot.message_handler(content_types=['contact'])
 def handle_registration(message):
@@ -111,16 +114,16 @@ def my_account(message):
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     
     purchases = list(logs_col.find({"uid": u['_id'], "type": "buy"}))
-    spent_today = sum(p['price'] for p in purchases if p['date'] >= today_start)
-    spent_month = sum(p['price'] for p in purchases if p['date'] >= month_start)
+    spent_today = sum(p.get('price', 0) for p in purchases if p['date'] >= today_start)
+    spent_month = sum(p.get('price', 0) for p in purchases if p['date'] >= month_start)
 
     text = (f"👤 **تفاصيل الحساب:**\n"
             f"━━━━━━━━━━━━━━━\n"
             f"📱 هاتف: `{u['phone']}`\n"
-            f"💰 الرصيد: {u.get('balance', 0)} د.ل\n\n"
+            f"💰 الرصيد: {format_price(u.get('balance', 0))} د.ل\n\n"
             f"📊 **تقارير الإنفاق:**\n"
-            f"▫️ إنفاق اليوم: {spent_today} د.ل\n"
-            f"▫️ إنفاق الشهر: {spent_month} د.ل")
+            f"▫️ إنفاق اليوم: {format_price(spent_today)} د.ل\n"
+            f"▫️ إنفاق الشهر: {format_price(spent_month)} د.ل")
     bot.send_message(uid, text, parse_mode="Markdown")
 
 # --- 5. نظام الشحن والحماية ---
@@ -144,7 +147,7 @@ def process_card_check(message):
     if card:
         users_col.update_one({"_id": uid}, {"$inc": {"balance": card['val']}, "$set": {"failed_attempts": 0}})
         cards_col.update_one({"_id": card['_id']}, {"$set": {"used": True, "by": uid, "at": datetime.datetime.now()}})
-        bot.send_message(uid, f"✅ تم شحن {card['val']} د.ل بنجاح لرصيدك!")
+        bot.send_message(uid, f"✅ تم شحن {format_price(card['val'])} د.ل بنجاح لرصيدك!")
     else:
         fails = user.get('failed_attempts', 0) + 1
         if fails >= 3:
@@ -201,10 +204,11 @@ def show_category_items(call):
 
     for name, data in unique_products.items():
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton(f"🛒 شراء ({data['price']} د.ل)", callback_data=f"buy_{name}"))
+        p_price = format_price(data['price'])
+        markup.add(types.InlineKeyboardButton(f"🛒 شراء ({p_price} د.ل)", callback_data=f"buy_{name}"))
         
         caption = (f"📦 **المنتج:** {name}\n"
-                   f"💰 **السعر:** {data['price']} د.ل\n"
+                   f"💰 **السعر:** {p_price} د.ل\n"
                    f"📊 **المتوفر:** {data['count']} كود")
         
         if data['image_url'] and data['image_url'].startswith("http"):
@@ -230,7 +234,16 @@ def finalize_purchase(call):
     else:
         stock_col.update_one({"_id": item['_id']}, {"$set": {"sold": True, "buyer": uid, "date": datetime.datetime.now()}})
         users_col.update_one({"_id": uid}, {"$inc": {"balance": -item['price']}})
-        logs_col.insert_one({"uid": uid, "type": "buy", "price": item['price'], "date": datetime.datetime.now(), "item": p_name})
+        
+        # حفظ بيانات الشراء والربح في التقارير
+        logs_col.insert_one({
+            "uid": uid, 
+            "type": "buy", 
+            "price": item['price'], 
+            "cost_price": item.get('cost_price', 0), 
+            "date": datetime.datetime.now(), 
+            "item": p_name
+        })
         
         bot.send_message(uid, f"✅ تم شراء **{p_name}** بنجاح!\n🎫 كود المنتج: `{item['code']}`", parse_mode="Markdown")
         bot.answer_callback_query(call.id, "تم الشراء بنجاح!")
@@ -269,7 +282,7 @@ def admin_callbacks(call):
         markup = types.InlineKeyboardMarkup()
         for u in all_u:
             status = "✅" if u.get('status') == 'active' else "❄️"
-            text += f"{status} `{u['phone']}` | {u.get('balance',0)} د.ل\n"
+            text += f"{status} `{u['phone']}` | {format_price(u.get('balance',0))} د.ل\n"
             markup.add(types.InlineKeyboardButton(f"⚙️ إدارة: {u['phone']}", callback_data=f"opt_{u['_id']}"))
         bot.send_message(ADMIN_ID, text, reply_markup=markup, parse_mode="Markdown")
 
@@ -282,15 +295,23 @@ def admin_callbacks(call):
         active_users = users_col.count_documents({"status": "active"})
         frozen_users = users_col.count_documents({"status": "frozen"})
         total_balance = sum(u.get('balance', 0) for u in users_col.find())
-        total_sales = sum(log['price'] for log in logs_col.find({"type": "buy"}))
+        
+        # حساب المبيعات والتكاليف والأرباح
+        buy_logs = list(logs_col.find({"type": "buy"}))
+        total_sales = sum(log.get('price', 0) for log in buy_logs)
+        total_costs = sum(log.get('cost_price', 0) for log in buy_logs)
+        total_profit = total_sales - total_costs
         
         text = (f"📊 **تقارير وإحصائيات النظام:**\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"👥 إجمالي المشتركين: **{total_users}**\n"
                 f"✅ الحسابات النشطة: **{active_users}**\n"
                 f"❄️ الحسابات المجمدة: **{frozen_users}**\n\n"
-                f"💰 إجمالي أرصدة المستخدمين: **{total_balance} د.ل**\n"
-                f"🛒 إجمالي المبيعات (الإنفاق): **{total_sales} د.ل**")
+                f"💳 إجمالي أرصدة المستخدمين: **{format_price(total_balance)} د.ل**\n\n"
+                f"🛒 **التقارير المالية (المبيعات):**\n"
+                f"📈 إجمالي المبيعات: **{format_price(total_sales)} د.ل**\n"
+                f"📉 إجمالي التكلفة: **{format_price(total_costs)} د.ل**\n"
+                f"💵 **صافي الأرباح:** **{format_price(total_profit)} د.ل**")
         bot.send_message(ADMIN_ID, text, parse_mode="Markdown")
 
     elif call.data == "adm_gen":
@@ -298,14 +319,16 @@ def admin_callbacks(call):
         bot.register_next_step_handler(msg, admin_generate_cards)
 
     elif call.data == "adm_stock_bulk":
-        msg_text = ("➕ **إضافة منتجات بأقسام وصور:**\n\n"
-                    "أرسل (القسم:الاسم:السعر:رابط_الصورة) في السطر الأول، ثم أرسل الأكواد في الأسطر التالية.\n\n"
-                    "**أمثلة:**\n"
-                    "اشتراكات:WATCH IT شهر:20:https://example.com/watchit.jpg\n"
-                    "أو\n"
-                    "اشتراكات:Shahid VIP شهر:25:https://example.com/shahid.jpg\n"
-                    "Code-1\n"
-                    "Code-2")
+        msg_text = ("➕ **إضافة منتجات (أكواد متعددة) مع حساب الأرباح:**\n\n"
+                    "أرسل البيانات بالصيغة التالية بالضبط (في رسالة واحدة):\n\n"
+                    "**القسم:الاسم:سعر التكلفة:سعر البيع:رابط الصورة**\n"
+                    "كود1\n"
+                    "كود2\n\n"
+                    "*(ملاحظة: إذا لم توجد صورة اكتب 'لا' مكان الرابط)*\n\n"
+                    "**مثال عملي لرسالة صحيحة:**\n"
+                    "ألعاب:ببجي 60 شدة:4:5:https://example.com/pubg.jpg\n"
+                    "PUBG-1234\n"
+                    "PUBG-5678")
         msg = bot.send_message(ADMIN_ID, msg_text, parse_mode="Markdown", disable_web_page_preview=True)
         bot.register_next_step_handler(msg, admin_add_stock_bulk)
 
@@ -319,7 +342,7 @@ def show_user_panel(uid):
     else:
         markup.add(types.InlineKeyboardButton("✅ تفعيل الحساب (فك التجميد)", callback_data=f"action_unfreeze_{uid}"))
         
-    bot.send_message(ADMIN_ID, f"👤 **معلومات وإدارة المشترك:**\n\n📱 الهاتف: `{user['phone']}`\n💰 الرصيد الحالي: {user.get('balance', 0)} د.ل\n📅 تاريخ التسجيل: {user['join_date'].strftime('%Y-%m-%d')}", reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(ADMIN_ID, f"👤 **معلومات وإدارة المشترك:**\n\n📱 الهاتف: `{user['phone']}`\n💰 الرصيد الحالي: {format_price(user.get('balance', 0))} د.ل\n📅 تاريخ التسجيل: {user['join_date'].strftime('%Y-%m-%d')}", reply_markup=markup, parse_mode="Markdown")
 
 def admin_search_user_exec(message):
     phone = message.text.strip()
@@ -390,25 +413,24 @@ def admin_generate_cards(message):
 def admin_add_stock_bulk(message):
     lines = message.text.strip().split('\n')
     if len(lines) < 2:
-        bot.send_message(ADMIN_ID, "❌ إدخال خاطئ! السطر الأول يجب أن يحتوي على (القسم:الاسم:السعر:رابط الصورة).")
+        bot.send_message(ADMIN_ID, "❌ إدخال خاطئ! يجب كتابة تفاصيل المنتج في السطر الأول، والأكواد في الأسطر التالية.")
         return
     try:
-        parts = lines[0].split(":")
+        # استخدام split("", 4) يضمن عدم تقسيم الروابط التي تحتوي على : مثل https://
+        parts = lines[0].split(":", 4)
         
-        if len(parts) < 3:
-            bot.send_message(ADMIN_ID, "❌ إدخال ناقص! تأكد من التنسيق: القسم:الاسم:السعر:رابط_الصورة")
+        if len(parts) < 5:
+            bot.send_message(ADMIN_ID, "❌ إدخال ناقص! تأكد من وجود 5 عناصر في السطر الأول مفصولة بـ (:)\nمثال: القسم:الاسم:سعرالتكلفة:سعرالبيع:رابط_الصورة")
             return
             
-        if len(parts) == 3: 
-            category = "عام"
-            name = parts[0].strip()
-            price = int(parts[1].strip())
-            image_url = ":".join(parts[2:]).strip()
-        else:
-            category = parts[0].strip()
-            name = parts[1].strip()
-            price = int(parts[2].strip())
-            image_url = ":".join(parts[3:]).strip() 
+        category = parts[0].strip()
+        name = parts[1].strip()
+        cost_price = float(parts[2].strip())
+        price = float(parts[3].strip())
+        image_url = parts[4].strip()
+        
+        if image_url.lower() in ["لا", "بدون", "none", "no", ""]:
+            image_url = ""
         
         codes = [line.strip() for line in lines[1:] if line.strip()]
         
@@ -416,12 +438,22 @@ def admin_add_stock_bulk(message):
              bot.send_message(ADMIN_ID, "❌ لم يتم العثور على أكواد في الرسالة.")
              return
 
-        docs = [{"category": category, "name": name, "price": price, "image_url": image_url, "code": c, "sold": False, "added_at": datetime.datetime.now()} for c in codes]
+        docs = [{
+            "category": category, 
+            "name": name, 
+            "cost_price": cost_price, 
+            "price": price, 
+            "image_url": image_url, 
+            "code": c, 
+            "sold": False, 
+            "added_at": datetime.datetime.now()
+        } for c in codes]
+        
         stock_col.insert_many(docs)
         
-        bot.send_message(ADMIN_ID, f"✅ تم إضافة **{len(codes)}** أكواد بنجاح.\n📁 **القسم:** {category}\n📦 **المنتج:** {name}\n💰 **السعر:** {price} د.ل\n🖼️ تم ربط الصورة بنجاح.", parse_mode="Markdown")
+        bot.send_message(ADMIN_ID, f"✅ تم إضافة **{len(codes)}** أكواد بنجاح.\n\n📁 **القسم:** {category}\n📦 **المنتج:** {name}\n📉 **سعر التكلفة:** {format_price(cost_price)} د.ل\n💰 **سعر البيع:** {format_price(price)} د.ل\n💵 **الربح للكود الواحد:** {format_price(price - cost_price)} د.ل\n🖼️ **الصورة:** {'مرفقة' if image_url else 'لا توجد'}", parse_mode="Markdown")
     except ValueError:
-        bot.send_message(ADMIN_ID, "❌ خطأ في السعر! تأكد من كتابة السعر كأرقام فقط.")
+        bot.send_message(ADMIN_ID, "❌ خطأ في السعر! تأكد من كتابة سعر التكلفة وسعر البيع كأرقام فقط.")
     except Exception as e:
         bot.send_message(ADMIN_ID, f"❌ حدث خطأ غير متوقع: {e}")
 
@@ -432,7 +464,7 @@ def run_bot():
             bot.remove_webhook()
             print("⏳ Waiting 5 seconds to clear old instances...")
             time.sleep(5) 
-            print("🚀 Al-Ahram Bot is Running Successfully with Categories...")
+            print("🚀 Al-Ahram Bot is Running Successfully with Profit Reports & Multi-codes...")
             bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
         except Exception as e:
             print(f"❌ توقف البوت فجأة، سيتم إعادة التشغيل بعد 10 ثوانٍ. السبب: {e}")
