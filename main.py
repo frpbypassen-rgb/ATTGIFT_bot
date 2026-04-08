@@ -19,7 +19,7 @@ def home():
     return "<h1>Al-Ahram System is Fully Operational</h1>"
 
 def run_flask():
-    # 🌟 المنفذ 10000 متوافق مع منصة Render كما طلبت
+    # المنفذ 10000 متوافق مع منصة Render
     port = int(os.environ.get('PORT', 10000))
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
@@ -164,6 +164,7 @@ def shop_categories(message):
     if not items:
         return bot.send_message(uid, "⚠️ لا توجد منتجات متوفرة حالياً في المخزن.")
     
+    # استخراج الفئات المتاحة
     categories = set(item.get('category', 'عام') for item in items)
     
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -233,4 +234,117 @@ def finalize_purchase(call):
         users_col.update_one({"_id": uid}, {"$inc": {"balance": -item['price']}})
         logs_col.insert_one({"uid": uid, "type": "buy", "price": item['price'], "date": datetime.datetime.now(), "item": p_name})
         
-        bot
+        bot.send_message(uid, f"✅ تم شراء **{p_name}** بنجاح!\n🎫 كود المنتج: `{item['code']}`", parse_mode="Markdown")
+        bot.answer_callback_query(call.id, "تم الشراء بنجاح!")
+        bot.delete_message(uid, call.message.message_id)
+
+# --- 7. لوحة التحكم (الأدمن) ---
+@bot.message_handler(commands=['admin'])
+def admin_panel(message):
+    if message.chat.id != ADMIN_ID: return
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("👥 إدارة المشتركين", callback_data="adm_users"),
+        types.InlineKeyboardButton("🔍 بحث برقم الهاتف", callback_data="adm_search_user")
+    )
+    markup.add(
+        types.InlineKeyboardButton("💰 شحن مباشر", callback_data="adm_direct"),
+        types.InlineKeyboardButton("📊 تقارير النظام", callback_data="adm_reports")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🎫 توليد كروت شحن", callback_data="adm_gen"),
+        types.InlineKeyboardButton("➕ إضافة بضاعة متقدمة", callback_data="adm_stock_bulk")
+    )
+    bot.send_message(ADMIN_ID, "🛠 **لوحة تحكم الإدارة:**", reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_"))
+def admin_callbacks(call):
+    if call.message.chat.id != ADMIN_ID: return
+
+    if call.data == "adm_direct":
+        msg = bot.send_message(ADMIN_ID, "📝 أرسل الرقم والقيمة هكذا (الرقم:القيمة)\nمثال: `0913731533:50`", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, admin_direct_recharge)
+    
+    elif call.data == "adm_users":
+        all_u = list(users_col.find().sort("join_date", -1).limit(30))
+        text = "👥 **قائمة المشتركين (آخر 30):**\n\n"
+        markup = types.InlineKeyboardMarkup()
+        for u in all_u:
+            status = "✅" if u.get('status') == 'active' else "❄️"
+            text += f"{status} `{u['phone']}` | {u.get('balance',0)} د.ل\n"
+            markup.add(types.InlineKeyboardButton(f"⚙️ إدارة: {u['phone']}", callback_data=f"opt_{u['_id']}"))
+        bot.send_message(ADMIN_ID, text, reply_markup=markup, parse_mode="Markdown")
+
+    elif call.data == "adm_search_user":
+        msg = bot.send_message(ADMIN_ID, "🔍 أرسل رقم هاتف المشترك للبحث عنه:")
+        bot.register_next_step_handler(msg, admin_search_user_exec)
+
+    elif call.data == "adm_reports":
+        total_users = users_col.count_documents({})
+        active_users = users_col.count_documents({"status": "active"})
+        frozen_users = users_col.count_documents({"status": "frozen"})
+        total_balance = sum(u.get('balance', 0) for u in users_col.find())
+        total_sales = sum(log['price'] for log in logs_col.find({"type": "buy"}))
+        
+        text = (f"📊 **تقارير وإحصائيات النظام:**\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"👥 إجمالي المشتركين: **{total_users}**\n"
+                f"✅ الحسابات النشطة: **{active_users}**\n"
+                f"❄️ الحسابات المجمدة: **{frozen_users}**\n\n"
+                f"💰 إجمالي أرصدة المستخدمين: **{total_balance} د.ل**\n"
+                f"🛒 إجمالي المبيعات (الإنفاق): **{total_sales} د.ل**")
+        bot.send_message(ADMIN_ID, text, parse_mode="Markdown")
+
+    elif call.data == "adm_gen":
+        msg = bot.send_message(ADMIN_ID, "🎫 أرسل (عدد الكروت:قيمة الكرت الواحد)\nمثال لتوليد 10 كروت بقيمة 5 دينار: `10:5`", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, admin_generate_cards)
+
+    elif call.data == "adm_stock_bulk":
+        msg_text = ("➕ **إضافة منتجات بأقسام وصور:**\n\n"
+                    "أرسل (القسم:الاسم:السعر:رابط_الصورة) في السطر الأول، ثم أرسل الأكواد في الأسطر التالية.\n\n"
+                    "**أمثلة:**\n"
+                    "اشتراكات:WATCH IT شهر:20:https://example.com/watchit.jpg\n"
+                    "أو\n"
+                    "اشتراكات:Shahid VIP شهر:25:https://example.com/shahid.jpg\n"
+                    "Code-1\n"
+                    "Code-2")
+        msg = bot.send_message(ADMIN_ID, msg_text, parse_mode="Markdown", disable_web_page_preview=True)
+        bot.register_next_step_handler(msg, admin_add_stock_bulk)
+
+def show_user_panel(uid):
+    user = users_col.find_one({"_id": uid})
+    if not user: return
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    if user.get('status') == 'active':
+        markup.add(types.InlineKeyboardButton("❄️ تجميد الحساب", callback_data=f"action_freeze_{uid}"))
+    else:
+        markup.add(types.InlineKeyboardButton("✅ تفعيل الحساب (فك التجميد)", callback_data=f"action_unfreeze_{uid}"))
+        
+    bot.send_message(ADMIN_ID, f"👤 **معلومات وإدارة المشترك:**\n\n📱 الهاتف: `{user['phone']}`\n💰 الرصيد الحالي: {user.get('balance', 0)} د.ل\n📅 تاريخ التسجيل: {user['join_date'].strftime('%Y-%m-%d')}", reply_markup=markup, parse_mode="Markdown")
+
+def admin_search_user_exec(message):
+    phone = message.text.strip()
+    user = users_col.find_one({"phone": phone})
+    if user:
+        show_user_panel(user['_id'])
+    else:
+        bot.send_message(ADMIN_ID, "❌ لم يتم العثور على أي مشترك بهذا الرقم.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("opt_") or call.data.startswith("action_"))
+def admin_user_management(call):
+    if call.message.chat.id != ADMIN_ID: return
+
+    data_parts = call.data.split("_")
+    
+    if call.data.startswith("opt_"):
+        uid = int(data_parts[1])
+        show_user_panel(uid)
+        bot.answer_callback_query(call.id)
+
+    elif call.data.startswith("action_"):
+        action = data_parts[1]
+        uid = int(data_parts[2])
+        if action == "freeze":
+            users_col.update_one({"_id": uid}, {"$set": {"status": "frozen", "freeze_reason": "تم تجميد حسابك من قبل الإدارة."}})
+            bot.answer_callback_query(call.id, "تم تجميد الحساب بنجاح
