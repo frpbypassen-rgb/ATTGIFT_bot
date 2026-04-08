@@ -8,9 +8,10 @@ import random
 import string
 from flask import Flask
 from threading import Thread
+import logging
 
 # --- 1. إعداد سيرفر Flask لتجاوز إغلاق منصة Render ---
-app = Flask('')
+app = Flask(__name__)
 
 @app.route('/')
 def home():
@@ -18,7 +19,7 @@ def home():
 
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
-    import logging
+    # إيقاف طباعة سجلات Flask المزعجة في الـ Console
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
     app.run(host='0.0.0.0', port=port)
@@ -31,6 +32,7 @@ SUPPORT_NUMBER = "+218 91-3731533"
 
 bot = telebot.TeleBot(API_TOKEN)
 
+# الاتصال بـ MongoDB مع شهادة certifi
 try:
     client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
     db = client['AlAhram_DB']
@@ -358,13 +360,18 @@ def admin_add_stock_bulk(message):
     except Exception as e:
         bot.send_message(ADMIN_ID, f"❌ حدث خطأ غير متوقع: {e}")
 
-# --- 8. تشغيل البوت النهائي ---
-if __name__ == "__main__":
-    Thread(target=run_flask).start()
-    bot.remove_webhook()
-    print("🚀 Al-Ahram Bot is Running Successfully with New Features...")
-    
+# --- 8. تشغيل البوت و Flask ---
+def run_bot():
     try:
+        bot.remove_webhook()
+        print("🚀 Al-Ahram Bot is Running Successfully with New Features...")
         bot.infinity_polling(skip_pending=True)
     except Exception as e:
-        print(f"حدث خطأ أثناء التشغيل: {e}")
+        print(f"❌ حدث خطأ أثناء تشغيل البوت: {e}")
+
+if __name__ == "__main__":
+    # 1. تشغيل البوت في خيط (Thread) منفصل في الخلفية
+    Thread(target=run_bot).start()
+    
+    # 2. تشغيل سيرفر Flask في المسار الرئيسي لكي يكتشفه Render بنجاح
+    run_flask()
