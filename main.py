@@ -18,13 +18,12 @@ def home():
 
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
-    # إيقاف طباعة سجلات Flask المزعجة في الـ Console
     import logging
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
     app.run(host='0.0.0.0', port=port)
 
-# --- 2. الإعدادات والربط بقاعدة البيانات (البيانات الأساسية كما طلبت) ---
+# --- 2. الإعدادات والربط بقاعدة البيانات ---
 API_TOKEN = '8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc'
 MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT"
 ADMIN_ID = 1262656649
@@ -32,7 +31,6 @@ SUPPORT_NUMBER = "+218 91-3731533"
 
 bot = telebot.TeleBot(API_TOKEN)
 
-# الاتصال بـ MongoDB مع شهادة certifi
 try:
     client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
     db = client['AlAhram_DB']
@@ -91,11 +89,16 @@ def handle_registration(message):
 
 @bot.message_handler(func=lambda m: m.text == "📢 الدعم الفني")
 def support_section(message):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("💬 تواصل عبر واتساب", url=f"https://wa.me/{SUPPORT_NUMBER.replace('+', '').replace(' ', '').replace('-', '')}"),
+        types.InlineKeyboardButton("✈️ تواصل عبر تيليجرام", url="https://t.me/AlAhram_Support")
+    )
     text = (f"📞 **خدمة العملاء المباشرة:**\n\n"
-            f"📱 واتساب/اتصال: `{SUPPORT_NUMBER}`\n"
-            f"💬 تلغرام المباشر: @AlAhram_Support\n\n"
-            f"نحن هنا لخدمتكم طوال اليوم.")
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+            f"نحن هنا لخدمتكم طوال اليوم.\n"
+            f"الرقم المباشر: `{SUPPORT_NUMBER}`\n\n"
+            f"اختر وسيلة التواصل المناسبة لك بالأسفل:")
+    bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "👤 حسابي")
 def my_account(message):
@@ -191,12 +194,18 @@ def finalize_purchase(call):
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     if message.chat.id != ADMIN_ID: return
-    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("👥 إدارة المشتركين", callback_data="adm_users"),
-        types.InlineKeyboardButton("💰 شحن مباشر برقم الهاتف", callback_data="adm_direct"),
+        types.InlineKeyboardButton("🔍 بحث برقم الهاتف", callback_data="adm_search_user")
+    )
+    markup.add(
+        types.InlineKeyboardButton("💰 شحن مباشر", callback_data="adm_direct"),
+        types.InlineKeyboardButton("📊 تقارير النظام", callback_data="adm_reports")
+    )
+    markup.add(
         types.InlineKeyboardButton("🎫 توليد كروت شحن", callback_data="adm_gen"),
-        types.InlineKeyboardButton("➕ إضافة بضاعة (أكواد)", callback_data="adm_stock")
+        types.InlineKeyboardButton("➕ إضافة بضاعة (مجموعة)", callback_data="adm_stock_bulk")
     )
     bot.send_message(ADMIN_ID, "🛠 **لوحة تحكم الإدارة:**", reply_markup=markup, parse_mode="Markdown")
 
@@ -218,13 +227,53 @@ def admin_callbacks(call):
             markup.add(types.InlineKeyboardButton(f"⚙️ إدارة: {u['phone']}", callback_data=f"opt_{u['_id']}"))
         bot.send_message(ADMIN_ID, text, reply_markup=markup, parse_mode="Markdown")
 
+    elif call.data == "adm_search_user":
+        msg = bot.send_message(ADMIN_ID, "🔍 أرسل رقم هاتف المشترك للبحث عنه:")
+        bot.register_next_step_handler(msg, admin_search_user_exec)
+
+    elif call.data == "adm_reports":
+        total_users = users_col.count_documents({})
+        active_users = users_col.count_documents({"status": "active"})
+        frozen_users = users_col.count_documents({"status": "frozen"})
+        total_balance = sum(u.get('balance', 0) for u in users_col.find())
+        total_sales = sum(log['price'] for log in logs_col.find({"type": "buy"}))
+        
+        text = (f"📊 **تقارير وإحصائيات النظام:**\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"👥 إجمالي المشتركين: **{total_users}**\n"
+                f"✅ الحسابات النشطة: **{active_users}**\n"
+                f"❄️ الحسابات المجمدة: **{frozen_users}**\n\n"
+                f"💰 إجمالي أرصدة المستخدمين: **{total_balance} د.ل**\n"
+                f"🛒 إجمالي المبيعات (الإنفاق): **{total_sales} د.ل**")
+        bot.send_message(ADMIN_ID, text, parse_mode="Markdown")
+
     elif call.data == "adm_gen":
         msg = bot.send_message(ADMIN_ID, "🎫 أرسل (عدد الكروت:قيمة الكرت الواحد)\nمثال لتوليد 10 كروت بقيمة 5 دينار: `10:5`", parse_mode="Markdown")
         bot.register_next_step_handler(msg, admin_generate_cards)
 
-    elif call.data == "adm_stock":
-        msg = bot.send_message(ADMIN_ID, "➕ أرسل تفاصيل المنتج كالتالي (اسم المنتج:السعر:كود التفعيل)\nمثال: `ببجي 60 شدة:5:PUBG-12345`", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, admin_add_stock)
+    elif call.data == "adm_stock_bulk":
+        msg = bot.send_message(ADMIN_ID, "➕ **إضافة مجموعة أكواد دفعة واحدة:**\n\nأرسل (اسم المنتج:السعر) في السطر الأول، ثم أرسل الأكواد في الأسطر التالية (كود في كل سطر).\n\n**مثال:**\nببجي 60 شدة:5\nPUBG-12345\nPUBG-67890", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, admin_add_stock_bulk)
+
+def show_user_panel(uid):
+    user = users_col.find_one({"_id": uid})
+    if not user: return
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    if user.get('status') == 'active':
+        markup.add(types.InlineKeyboardButton("❄️ تجميد الحساب", callback_data=f"action_freeze_{uid}"))
+    else:
+        markup.add(types.InlineKeyboardButton("✅ تفعيل الحساب (فك التجميد)", callback_data=f"action_unfreeze_{uid}"))
+        
+    bot.send_message(ADMIN_ID, f"👤 **معلومات وإدارة المشترك:**\n\n📱 الهاتف: `{user['phone']}`\n💰 الرصيد الحالي: {user.get('balance', 0)} د.ل\n📅 تاريخ التسجيل: {user['join_date'].strftime('%Y-%m-%d')}", reply_markup=markup, parse_mode="Markdown")
+
+def admin_search_user_exec(message):
+    phone = message.text.strip()
+    user = users_col.find_one({"phone": phone})
+    if user:
+        show_user_panel(user['_id'])
+    else:
+        bot.send_message(ADMIN_ID, "❌ لم يتم العثور على أي مشترك بهذا الرقم.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("opt_") or call.data.startswith("action_"))
 def admin_user_management(call):
@@ -234,16 +283,7 @@ def admin_user_management(call):
     
     if call.data.startswith("opt_"):
         uid = int(data_parts[1])
-        user = users_col.find_one({"_id": uid})
-        if not user: return bot.answer_callback_query(call.id, "المستخدم غير موجود!")
-        
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        if user.get('status') == 'active':
-            markup.add(types.InlineKeyboardButton("❄️ تجميد الحساب", callback_data=f"action_freeze_{uid}"))
-        else:
-            markup.add(types.InlineKeyboardButton("✅ تفعيل الحساب (فك التجميد)", callback_data=f"action_unfreeze_{uid}"))
-            
-        bot.send_message(ADMIN_ID, f"إعدادات المستخدم: `{user['phone']}`\nالرصيد: {user.get('balance', 0)} د.ل", reply_markup=markup, parse_mode="Markdown")
+        show_user_panel(uid)
         bot.answer_callback_query(call.id)
 
     elif call.data.startswith("action_"):
@@ -293,26 +333,36 @@ def admin_generate_cards(message):
     except ValueError:
         bot.send_message(ADMIN_ID, "❌ خطأ في الإدخال! يرجى التأكد من إدخال أرقام صحيحة بالصيغة (العدد:القيمة).")
 
-def admin_add_stock(message):
+def admin_add_stock_bulk(message):
+    lines = message.text.strip().split('\n')
+    if len(lines) < 2:
+        bot.send_message(ADMIN_ID, "❌ إدخال خاطئ! يجب أن يحتوي السطر الأول على (الاسم:السعر)، والأسطر التالية على الأكواد.")
+        return
     try:
-        parts = message.text.split(":")
-        if len(parts) != 3:
-            raise ValueError
-        
+        parts = lines[0].split(":")
         name = parts[0].strip()
         price = int(parts[1].strip())
-        code = parts[2].strip()
+        
+        codes = [line.strip() for line in lines[1:] if line.strip()]
+        
+        if not codes:
+             bot.send_message(ADMIN_ID, "❌ لم يتم العثور على أكواد في الرسالة.")
+             return
 
-        stock_col.insert_one({"name": name, "price": price, "code": code, "sold": False, "added_at": datetime.datetime.now()})
-        bot.send_message(ADMIN_ID, f"✅ تم إضافة المنتج بنجاح للمخزن:\n\n📦 **الاسم:** {name}\n💰 **السعر:** {price} د.ل\n🔑 **الكود:** `{code}`", parse_mode="Markdown")
+        docs = [{"name": name, "price": price, "code": c, "sold": False, "added_at": datetime.datetime.now()} for c in codes]
+        stock_col.insert_many(docs)
+        
+        bot.send_message(ADMIN_ID, f"✅ تم إضافة **{len(codes)}** أكواد لمنتج **{name}** بسعر {price} د.ل بنجاح.", parse_mode="Markdown")
     except ValueError:
-        bot.send_message(ADMIN_ID, "❌ خطأ في الإدخال! يرجى الالتزام بالصيغة المطلوبة (الاسم:السعر:الكود).")
+        bot.send_message(ADMIN_ID, "❌ خطأ في تنسيق السطر الأول! يرجى التأكد من استخدام (الاسم:السعر).")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ حدث خطأ غير متوقع: {e}")
 
 # --- 8. تشغيل البوت النهائي ---
 if __name__ == "__main__":
     Thread(target=run_flask).start()
     bot.remove_webhook()
-    print("🚀 Al-Ahram Bot is Running Successfully...")
+    print("🚀 Al-Ahram Bot is Running Successfully with New Features...")
     
     try:
         bot.infinity_polling(skip_pending=True)
