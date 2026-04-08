@@ -5,64 +5,60 @@ import random
 import string
 import datetime
 import os
+import certifi
 from flask import Flask
 from threading import Thread
-import certifi
 
-# --- 1. إعداد سيرفر الوهمي (Render Keep-Alive) ---
+# --- إعدادات السيرفر (Render Port Binding) ---
 app = Flask('')
 @app.route('/')
-def home(): return "Bot is Online and Secure"
+def home(): return "Bot is Online"
 
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- 2. البيانات الأساسية ---
+# --- إعدادات البوت والبيانات ---
 API_TOKEN = '8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc'
-MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT&tlsAllowInvalidCertificates=true"
+MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT"
 ADMIN_ID = 1262656649
-SUPPORT_NUMBER = "218913731533"
 
 bot = telebot.TeleBot(API_TOKEN)
-
-# الاتصال بقاعدة البيانات مع معالجة أخطاء SSL
+# استخدام certifi لتجنب أخطاء SSL Handshake على Render
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-db = client['StoreDB_v2']
+db = client['AlAhram_DB']
 users_col = db['users']
 cards_col = db['topup_cards']
 stock_col = db['stock']
 logs_col = db['logs']
 
-# --- 3. الدوال المساعدة ونظام الحماية ---
-def is_frozen(uid):
-    """التحقق من حالة الحساب (تجميد/تفعيل)"""
+# --- وظائف الحماية والتحقق ---
+def check_status(uid):
     user = users_col.find_one({"_id": uid})
     if user and user.get('status') == 'frozen':
-        reason = user.get('freeze_reason', 'مخالفة سياسة الاستخدام')
-        bot.send_message(uid, f"⚠️ عذراً، حسابك مجمد حالياً!\n\n📌 السبب: {reason}\n\n📞 للتفعيل، يرجى التواصل مع الدعم الفني.")
-        return True
-    return False
+        reason = user.get('freeze_reason', 'مخالفة الشروط')
+        bot.send_message(uid, f"⚠️ حسابك مجمد حالياً!\n📌 السبب: {reason}\n📞 تواصل مع الدعم للفك.")
+        return False
+    return True
 
 def main_menu():
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    markup.add("🛒 شراء كود", "💳 شحن كود", "🏦 شحن مباشر")
+    markup.add("🛒 شراء كود", "💳 شحن رصيد")
     markup.add("👤 حسابي", "📢 الدعم الفني")
     return markup
 
-# --- 4. أوامر المستخدم ---
+# --- أوامر المستخدم ---
 @bot.message_handler(commands=['start'])
 def start(message):
     uid = message.chat.id
-    if is_frozen(uid): return
-    
     user = users_col.find_one({"_id": uid})
     if not user:
         markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
-        markup.add(types.KeyboardButton("📱 مشاركة جهة الاتصال للتفعيل", request_contact=True))
-        bot.send_message(uid, "🔹 مرحباً بك في شركة الأهرام للاتصالات والتقنية\nيرجى تسجيل حسابك بالضغط على الزر أدناه:", reply_markup=markup)
+        markup.add(types.KeyboardButton("📱 تسجيل الحساب", request_contact=True))
+        bot.send_message(uid, "🔹 مرحباً بك في شركة الأهرام للاتصالات\nيرجى التسجيل للمتابعة:", reply_markup=markup)
     else:
-        bot.send_message(uid, f"أهلاً بك مجدداً!\nرصيدك الحالي: {user['balance']} د.ل", reply_markup=main_menu())
+        if not check_status(uid): return
+        bot.send_message(uid, "أهلاً بك في القائمة الرئيسية", reply_markup=main_menu())
 
 @bot.message_handler(content_types=['contact'])
 def handle_contact(message):
@@ -72,177 +68,142 @@ def handle_contact(message):
             "phone": message.contact.phone_number, 
             "balance": 0, 
             "status": "active",
-            "join_date": datetime.datetime.now().strftime("%Y-%m-%d")
+            "join_date": datetime.datetime.now()
         }
         users_col.update_one({"_id": message.chat.id}, {"$set": user_data}, upsert=True)
-        bot.send_message(message.chat.id, "✅ تم تفعيل حسابك بنجاح في النظام السحابي!", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "✅ تم تفعيل حسابك!", reply_markup=main_menu())
 
 @bot.message_handler(func=lambda m: m.text == "👤 حسابي")
 def my_account(message):
-    if is_frozen(message.chat.id): return
-    user = users_col.find_one({"_id": message.chat.id})
-    if user:
-        text = (f"👤 **بيانات الحساب:**\n\n"
-                f"📱 الرقم: `{user['phone']}`\n"
-                f"💰 الرصيد: {user['balance']} د.ل\n"
-                f"📅 تاريخ التسجيل: {user['join_date']}")
-        bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    uid = message.chat.id
+    if not check_status(uid): return
+    user = users_col.find_one({"_id": uid})
+    
+    # حساب الإحصائيات المالية
+    now = datetime.datetime.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    today_spent = sum(log['amt'] for log in logs_col.find({"uid": uid, "type": "purchase", "date": {"$gte": today_start}}))
+    month_spent = sum(log['amt'] for log in logs_col.find({"uid": uid, "type": "purchase", "date": {"$gte": month_start}}))
+    
+    text = (f"👤 **تفاصيل حسابك:**\n\n"
+            f"📱 الرقم: `{user['phone']}`\n"
+            f"💰 الرصيد الحالي: {user['balance']} د.ل\n"
+            f"📅 انضممت في: {user['join_date'].strftime('%Y-%m-%d')}\n\n"
+            f"📊 **إحصائيات الإنفاق:**\n"
+            f"▫️ صرف اليوم: {abs(today_spent)} د.ل\n"
+            f"▫️ صرف الشهر: {abs(month_spent)} د.ل")
+    bot.send_message(uid, text, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda m: m.text == "📢 الدعم الفني")
-def support(message):
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("💬 واتساب الدعم الفني", url=f"https://wa.me/{SUPPORT_NUMBER}"))
-    bot.send_message(message.chat.id, "لأية استفسارات أو مشاكل تقنية، نحن هنا للمساعدة:", reply_markup=markup)
+@bot.message_handler(func=lambda m: m.text == "💳 شحن رصيد")
+def charge_request(message):
+    if not check_status(message.chat.id): return
+    msg = bot.send_message(message.chat.id, "أرسل كود الكرت المكون من 12 رمزاً:")
+    bot.register_next_step_handler(msg, process_redeem)
 
-# --- 5. نظام الشحن المباشر للمحفظة ---
-@bot.message_handler(func=lambda m: m.text == "🏦 شحن مباشر")
-def direct_request(message):
-    if is_frozen(message.chat.id): return
-    msg = bot.send_message(message.chat.id, "يرجى إرسال البيانات كالتالي:\n(رقم حسابك : القيمة المراد شحنها)\n\nمثال: 55667 : 100")
-    bot.register_next_step_handler(msg, forward_charge_to_admin)
+def process_redeem(message):
+    code = message.text.strip()
+    card = cards_col.find_one({"code": code, "used": False})
+    if card:
+        cards_col.update_one({"_id": card['_id']}, {"$set": {"used": True}})
+        users_col.update_one({"_id": message.chat.id}, {"$inc": {"balance": card['val']}})
+        logs_col.insert_one({"uid": message.chat.id, "type": "charge", "amt": card['val'], "date": datetime.datetime.now()})
+        bot.send_message(message.chat.id, f"✅ تم شحن {card['val']} د.ل بنجاح!")
+    else:
+        bot.send_message(message.chat.id, "❌ الكود خاطئ أو تم استخدامه مسبقاً.")
 
-def forward_charge_to_admin(message):
-    try:
-        acc, amt = [i.strip() for i in message.text.split(":")]
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("✅ تأكيد وإضافة رصيد", callback_data=f"pay_{message.chat.id}_{amt}"))
-        bot.send_message(ADMIN_ID, f"⚠️ **طلب شحن محفظة:**\n\n👤 العميل: {message.chat.id}\n🏦 رقم الحساب: {acc}\n💰 المبلغ: {amt} د.ل", reply_markup=markup)
-        bot.send_message(message.chat.id, "✅ تم إرسال طلبك للإدارة. ستتلقى إشعاراً فور التأكيد.")
-    except:
-        bot.send_message(message.chat.id, "❌ خطأ في التنسيق، حاول مجدداً.")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("pay_"))
-def admin_confirm_pay(call):
-    _, uid, amt = call.data.split("_")
-    users_col.update_one({"_id": int(uid)}, {"$inc": {"balance": int(amt)}})
-    logs_col.insert_one({"uid": int(uid), "action": "شحن مباشر", "amt": int(amt), "date": datetime.datetime.now()})
-    bot.send_message(int(uid), f"✅ تم تأكيد عملية الشحن! تم إضافة {amt} د.ل لمحفظتك.")
-    bot.edit_message_text(f"✅ تم تنفيذ الشحن للمستخدم بنجاح ({amt} د.ل)", ADMIN_ID, call.message.message_id)
-
-# --- 6. نظام الإدارة (تجميد، إضافة بضاعة، كروت) ---
+# --- لوحة الإدارة (ADMIN) ---
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     if message.chat.id != ADMIN_ID: return
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton("📦 إضافة بضاعة (متعددة)", callback_data="adm_stock"),
-        types.InlineKeyboardButton("🎫 توليد كروت شحن", callback_data="adm_gen"),
-        types.InlineKeyboardButton("👥 إدارة وتجميد المستخدمين", callback_data="adm_users")
+        types.InlineKeyboardButton("➕ إضافة بضاعة", callback_data="adm_add_stock"),
+        types.InlineKeyboardButton("🎫 توليد كروت شحن", callback_data="adm_gen_cards"),
+        types.InlineKeyboardButton("👥 إدارة المشتركين", callback_data="adm_list_users"),
+        types.InlineKeyboardButton("💰 شحن رصيد لعميل", callback_data="adm_charge_user")
     )
-    bot.send_message(ADMIN_ID, "🛠 لوحة التحكم المركزية:", reply_markup=markup)
+    bot.send_message(ADMIN_ID, "🛠 لوحة إدارة الأهرام:", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data == "adm_users")
-def list_users_for_admin(call):
-    users = users_col.find().limit(20)
+@bot.callback_query_handler(func=lambda call: call.data == "adm_list_users")
+def list_users(call):
+    users = users_col.find().limit(15)
+    text = "👥 **قائمة المشتركين وأرصدتهم:**\n\n"
     markup = types.InlineKeyboardMarkup()
     for u in users:
-        status = "✅" if u.get('status') == 'active' else "❄️"
-        markup.add(types.InlineKeyboardButton(f"{status} {u['phone']} - {u['balance']}د.ل", callback_data=f"manage_{u['_id']}"))
-    bot.send_message(ADMIN_ID, "اختر مستخدماً للإدارة:", reply_markup=markup)
+        icon = "✅" if u.get('status') == 'active' else "❄️"
+        text += f"{icon} `{u['phone']}` -> {u['balance']} د.ل\n"
+        markup.add(types.InlineKeyboardButton(f"إدارة {u['phone']}", callback_data=f"manage_{u['_id']}"))
+    bot.send_message(ADMIN_ID, text, reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("manage_"))
-def manage_single_user(call):
+def manage_user_options(call):
     uid = int(call.data.split("_")[1])
-    u = users_col.find_one({"_id": uid})
+    user = users_col.find_one({"_id": uid})
     markup = types.InlineKeyboardMarkup()
-    if u.get('status') == 'active':
+    if user.get('status') == 'active':
         markup.add(types.InlineKeyboardButton("❄️ تجميد الحساب", callback_data=f"freeze_{uid}"))
     else:
-        markup.add(types.InlineKeyboardButton("✅ تفعيل الحساب", callback_data=f"activate_{uid}"))
-    
-    bot.send_message(ADMIN_ID, f"👤 المشترك: {u['phone']}\n💰 الرصيد: {u['balance']}\nالحالة: {u.get('status')}", reply_markup=markup)
+        markup.add(types.InlineKeyboardButton("✅ إلغاء التجميد", callback_data=f"unfreeze_{uid}"))
+    bot.send_message(ADMIN_ID, f"إدارة حساب: {user['phone']}", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("freeze_"))
-def freeze_input(call):
+def freeze_step1(call):
     uid = call.data.split("_")[1]
-    msg = bot.send_message(ADMIN_ID, "ارسل سبب التجميد:")
+    msg = bot.send_message(ADMIN_ID, "أرسل سبب التجميد ليظهر للمستخدم:")
     bot.register_next_step_handler(msg, lambda m: execute_freeze(m, uid))
 
 def execute_freeze(message, uid):
     users_col.update_one({"_id": int(uid)}, {"$set": {"status": "frozen", "freeze_reason": message.text}})
-    bot.send_message(ADMIN_ID, "✅ تم التجميد.")
+    bot.send_message(ADMIN_ID, "✅ تم التجميد بنجاح.")
     bot.send_message(int(uid), f"⚠️ تم تجميد حسابك.\nالسبب: {message.text}")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("activate_"))
-def execute_activate(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("unfreeze_"))
+def execute_unfreeze(call):
     uid = int(call.data.split("_")[1])
     users_col.update_one({"_id": uid}, {"$set": {"status": "active", "freeze_reason": ""}})
-    bot.send_message(ADMIN_ID, "✅ تم تفعيل الحساب.")
-    bot.send_message(uid, "✅ تم إعادة تفعيل حسابك، يمكنك استخدامه الآن.")
+    bot.send_message(ADMIN_ID, "✅ تم إلغاء التجميد.")
+    bot.send_message(uid, "✅ تم تفعيل حسابك مجدداً.")
 
-# --- 7. توليد الكروت والشراء ---
-@bot.callback_query_handler(func=lambda call: call.data == "adm_gen")
-def prompt_gen(call):
-    msg = bot.send_message(ADMIN_ID, "أرسل (الفئة : العدد)\nمثال: 50 : 10")
-    bot.register_next_step_handler(msg, finalize_gen)
+@bot.callback_query_handler(func=lambda call: call.data == "adm_charge_user")
+def admin_charge_prompt(call):
+    msg = bot.send_message(ADMIN_ID, "أرسل (رقم الهاتف : القيمة)\nمثال: 0910000000 : 50")
+    bot.register_next_step_handler(msg, process_admin_charge)
 
-def finalize_gen(message):
+def process_admin_charge(message):
     try:
-        val, count = [int(i.strip()) for i in message.text.split(":")]
-        cards = []
+        phone, val = message.text.split(":")
+        user = users_col.find_one({"phone": phone.strip()})
+        if user:
+            users_col.update_one({"_id": user['_id']}, {"$inc": {"balance": int(val.strip())}})
+            bot.send_message(ADMIN_ID, f"✅ تم شحن {val} د.ل للرقم {phone}")
+            bot.send_message(user['_id'], f"✅ تم إضافة {val} د.ل لرصيدك من قبل الإدارة.")
+        else:
+            bot.send_message(ADMIN_ID, "❌ الرقم غير مسجل في البوت.")
+    except:
+        bot.send_message(ADMIN_ID, "❌ خطأ في التنسيق.")
+
+# --- توليد كروت وفئات ---
+@bot.callback_query_handler(func=lambda call: call.data == "adm_gen_cards")
+def gen_cards_prompt(call):
+    msg = bot.send_message(ADMIN_ID, "أرسل (الفئة : العدد)\nمثال: 20 : 10")
+    bot.register_next_step_handler(msg, process_card_gen)
+
+def process_card_gen(message):
+    try:
+        f_val, count = map(int, message.text.split(":"))
+        generated = []
         for _ in range(count):
             code = "AHRAM-" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
-            cards_col.insert_one({"code": code, "value": val, "used": False})
-            cards.append(f"`{code}`")
-        bot.send_message(ADMIN_ID, f"✅ تم توليد {count} كرت فئة {val}د.ل:\n\n" + "\n".join(cards), parse_mode="Markdown")
-    except: bot.send_message(ADMIN_ID, "❌ خطأ في التنسيق.")
+            cards_col.insert_one({"code": code, "val": f_val, "used": False})
+            generated.append(f"`{code}`")
+        bot.send_message(ADMIN_ID, f"✅ تم توليد {count} كرت فئة {f_val}:\n\n" + "\n".join(generated), parse_mode="Markdown")
+    except:
+        bot.send_message(ADMIN_ID, "❌ خطأ في التنسيق.")
 
-@bot.message_handler(func=lambda m: m.text == "💳 شحن كود")
-def redeem_input(message):
-    if is_frozen(message.chat.id): return
-    msg = bot.send_message(message.chat.id, "أدخل كود الشحن:")
-    bot.register_next_step_handler(msg, do_redeem)
-
-def do_redeem(message):
-    card = cards_col.find_one_and_delete({"code": message.text.strip(), "used": False})
-    if card:
-        users_col.update_one({"_id": message.chat.id}, {"$inc": {"balance": card['value']}})
-        bot.send_message(message.chat.id, f"✅ تم شحن {card['value']} د.ل بنجاح!")
-    else: bot.send_message(message.chat.id, "❌ كود خاطئ أو مستخدم.")
-
-@bot.callback_query_handler(func=lambda call: call.data == "adm_stock")
-def prompt_stock(call):
-    msg = bot.send_message(ADMIN_ID, "أرسل البضاعة هكذا:\n(الاسم : السعر : كود1, كود2, كود3)")
-    bot.register_next_step_handler(msg, finalize_stock)
-
-def finalize_stock(message):
-    try:
-        name, price, codes = message.text.split(":")
-        price = int(price.strip())
-        code_list = [c.strip() for c in codes.replace("\n", ",").split(",")]
-        for c in code_list:
-            if c: stock_col.insert_one({"name": name.strip(), "price": price, "secret": c})
-        bot.send_message(ADMIN_ID, f"✅ تم إضافة {len(code_list)} كود لمنتج {name}")
-    except: bot.send_message(ADMIN_ID, "❌ خطأ في التنسيق.")
-
-@bot.message_handler(func=lambda m: m.text == "🛒 شراء كود")
-def show_shop(message):
-    if is_frozen(message.chat.id): return
-    prods = stock_col.distinct("name")
-    if not prods: return bot.send_message(message.chat.id, "المخزن فارغ حالياً.")
-    markup = types.InlineKeyboardMarkup()
-    for p in prods:
-        item = stock_col.find_one({"name": p})
-        markup.add(types.InlineKeyboardButton(f"{p} - {item['price']} د.ل", callback_data=f"buy_{p}"))
-    bot.send_message(message.chat.id, "اختر المنتج المراد شراؤه:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
-def finish_buy(call):
-    p_name = call.data.split("_")[1]
-    uid = call.message.chat.id
-    if is_frozen(uid): return
-    user = users_col.find_one({"_id": uid})
-    item = stock_col.find_one({"name": p_name})
-    if item and user['balance'] >= item['price']:
-        users_col.update_one({"_id": uid}, {"$inc": {"balance": -item['price']}})
-        stock_col.delete_one({"_id": item['_id']})
-        bot.send_message(uid, f"✅ تم الشراء بنجاح!\nمنتجك: {p_name}\nالكود: `{item['secret']}`", parse_mode="Markdown")
-    else: bot.answer_callback_query(call.id, "❌ رصيد غير كافٍ", show_alert=True)
-
-# --- 8. تشغيل السيرفر والبوت ---
+# --- تشغيل البوت مع حل مشكلة التعارض ---
 if __name__ == "__main__":
-    t = Thread(target=run_flask)
-    t.daemon = True
-    t.start()
-    print("--- Al-Ahram Bot is Secure and Running ---")
-    bot.infinity_polling()
+    Thread(target=run_flask).start()
+    bot.delete_webhook() # تنظيف أي Webhook سابق لتجنب خطأ 409
+    bot.infinity_polling(skip_pending=True)
