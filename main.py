@@ -19,7 +19,6 @@ def home():
     return "<h1>Al-Ahram System is Fully Operational</h1>"
 
 def run_flask():
-    # المنفذ 10000 متوافق مع منصة Render
     port = int(os.environ.get('PORT', 10000))
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
@@ -164,7 +163,6 @@ def shop_categories(message):
     if not items:
         return bot.send_message(uid, "⚠️ لا توجد منتجات متوفرة حالياً في المخزن.")
     
-    # استخراج الفئات المتاحة
     categories = set(item.get('category', 'عام') for item in items)
     
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -347,4 +345,99 @@ def admin_user_management(call):
         uid = int(data_parts[2])
         if action == "freeze":
             users_col.update_one({"_id": uid}, {"$set": {"status": "frozen", "freeze_reason": "تم تجميد حسابك من قبل الإدارة."}})
-            bot.answer_callback_query(call.id, "تم تجميد الحساب بنجاح
+            bot.answer_callback_query(call.id, "تم تجميد الحساب بنجاح.", show_alert=True)
+            bot.send_message(uid, "⚠️ تم تجميد حسابك من قبل الإدارة.")
+        elif action == "unfreeze":
+            users_col.update_one({"_id": uid}, {"$set": {"status": "active", "failed_attempts": 0}})
+            bot.answer_callback_query(call.id, "تم فك التجميد بنجاح.", show_alert=True)
+            bot.send_message(uid, "✅ تم تفعيل حسابك مجدداً من قبل الإدارة.")
+        bot.delete_message(ADMIN_ID, call.message.message_id)
+
+def admin_direct_recharge(message):
+    try:
+        phone, amount = message.text.split(":")
+        amount = int(amount.strip())
+        phone = phone.strip()
+        target = users_col.find_one({"phone": phone})
+        if target:
+            users_col.update_one({"_id": target['_id']}, {"$inc": {"balance": amount}})
+            bot.send_message(ADMIN_ID, f"✅ تم شحن {amount} د.ل للرقم {phone} بنجاح.")
+            bot.send_message(target['_id'], f"💰 **تم إضافة {amount} د.ل لرصيدك من قبل الإدارة.**", parse_mode="Markdown")
+        else:
+            bot.send_message(ADMIN_ID, "❌ لم يتم العثور على هذا الرقم في قاعدة البيانات.")
+    except ValueError:
+        bot.send_message(ADMIN_ID, "❌ خطأ في الإدخال! يرجى التأكد من الصيغة (الرقم:القيمة).")
+
+def admin_generate_cards(message):
+    try:
+        count, value = map(int, message.text.split(":"))
+        if count > 50:
+            bot.send_message(ADMIN_ID, "❌ لتجنب الضغط، أقصى عدد لتوليد الكروت في المرة الواحدة هو 50.")
+            return
+
+        cards = []
+        msg_text = f"✅ **تم توليد {count} كرت بقيمة {value} د.ل:**\n\n"
+        for _ in range(count):
+            code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
+            cards.append({"code": code, "val": value, "used": False, "generated_at": datetime.datetime.now()})
+            msg_text += f"`{code}`\n"
+        
+        cards_col.insert_many(cards)
+        bot.send_message(ADMIN_ID, msg_text, parse_mode="Markdown")
+    except ValueError:
+        bot.send_message(ADMIN_ID, "❌ خطأ في الإدخال! يرجى التأكد من إدخال أرقام صحيحة بالصيغة (العدد:القيمة).")
+
+def admin_add_stock_bulk(message):
+    lines = message.text.strip().split('\n')
+    if len(lines) < 2:
+        bot.send_message(ADMIN_ID, "❌ إدخال خاطئ! السطر الأول يجب أن يحتوي على (القسم:الاسم:السعر:رابط الصورة).")
+        return
+    try:
+        parts = lines[0].split(":")
+        
+        if len(parts) < 3:
+            bot.send_message(ADMIN_ID, "❌ إدخال ناقص! تأكد من التنسيق: القسم:الاسم:السعر:رابط_الصورة")
+            return
+            
+        if len(parts) == 3: 
+            category = "عام"
+            name = parts[0].strip()
+            price = int(parts[1].strip())
+            image_url = ":".join(parts[2:]).strip()
+        else:
+            category = parts[0].strip()
+            name = parts[1].strip()
+            price = int(parts[2].strip())
+            image_url = ":".join(parts[3:]).strip() 
+        
+        codes = [line.strip() for line in lines[1:] if line.strip()]
+        
+        if not codes:
+             bot.send_message(ADMIN_ID, "❌ لم يتم العثور على أكواد في الرسالة.")
+             return
+
+        docs = [{"category": category, "name": name, "price": price, "image_url": image_url, "code": c, "sold": False, "added_at": datetime.datetime.now()} for c in codes]
+        stock_col.insert_many(docs)
+        
+        bot.send_message(ADMIN_ID, f"✅ تم إضافة **{len(codes)}** أكواد بنجاح.\n📁 **القسم:** {category}\n📦 **المنتج:** {name}\n💰 **السعر:** {price} د.ل\n🖼️ تم ربط الصورة بنجاح.", parse_mode="Markdown")
+    except ValueError:
+        bot.send_message(ADMIN_ID, "❌ خطأ في السعر! تأكد من كتابة السعر كأرقام فقط.")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ حدث خطأ غير متوقع: {e}")
+
+# --- 8. تشغيل البوت و Flask ---
+def run_bot():
+    while True:
+        try:
+            bot.remove_webhook()
+            print("⏳ Waiting 5 seconds to clear old instances...")
+            time.sleep(5) 
+            print("🚀 Al-Ahram Bot is Running Successfully with Categories...")
+            bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            print(f"❌ توقف البوت فجأة، سيتم إعادة التشغيل بعد 10 ثوانٍ. السبب: {e}")
+            time.sleep(10)
+
+if __name__ == "__main__":
+    Thread(target=run_bot).start()
+    run_flask()
