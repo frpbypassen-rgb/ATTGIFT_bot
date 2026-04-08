@@ -57,6 +57,10 @@ def charge(msg):
     bot.register_next_step_handler(msg, check_card)
 
 def check_card(msg):
+    # إلغاء إذا ضغط المستخدم على زر من القائمة
+    if msg.text in ["🛒 شراء", "💳 شحن", "👤 حسابي"]:
+        return bot.send_message(msg.chat.id, "تم إلغاء عملية الشحن.")
+
     code = msg.text.strip()
     uid = msg.chat.id
 
@@ -66,15 +70,18 @@ def check_card(msg):
     )
 
     if not card:
-        return bot.send_message(uid, "❌ كود غير صالح")
+        return bot.send_message(uid, "❌ كود غير صالح أو مستخدم مسبقاً")
 
     users.update_one({"_id": uid}, {"$inc": {"balance": card["value"]}})
-    bot.send_message(uid, f"✅ تم شحن {card['value']}")
+    bot.send_message(uid, f"✅ تم شحن {card['value']} بنجاح")
 
 # ========= SHOP =========
 @bot.message_handler(func=lambda m: m.text == "🛒 شراء")
 def shop(msg):
     cats = stock.distinct("category")
+
+    if not cats:
+        return bot.send_message(msg.chat.id, "❌ لا توجد منتجات حالياً")
 
     kb = types.InlineKeyboardMarkup()
     for c in cats:
@@ -84,13 +91,13 @@ def shop(msg):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cat_"))
 def cat(call):
-    cat = call.data.split("_",1)[1]
+    cat_name = call.data.split("_",1)[1]
 
-    subs = stock.distinct("subcategory", {"category": cat})
+    subs = stock.distinct("subcategory", {"category": cat_name})
 
     kb = types.InlineKeyboardMarkup()
     for s in subs:
-        kb.add(types.InlineKeyboardButton(s, callback_data=f"sub_{cat}_{s}"))
+        kb.add(types.InlineKeyboardButton(s, callback_data=f"sub_{cat_name}_{s}"))
 
     bot.edit_message_text("اختر فئة:",
         call.message.chat.id,
@@ -99,16 +106,16 @@ def cat(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sub_"))
 def sub(call):
-    _, cat, sub = call.data.split("_",2)
+    _, cat_name, sub_name = call.data.split("_",2)
 
     items = list(stock.find({
-        "category": cat,
-        "subcategory": sub,
+        "category": cat_name,
+        "subcategory": sub_name,
         "sold": False
     }))
 
     if not items:
-        return bot.answer_callback_query(call.id, "❌ لا يوجد")
+        return bot.answer_callback_query(call.id, "❌ نفذت الكمية")
 
     item = items[0]
 
@@ -116,7 +123,7 @@ def sub(call):
     kb.add(types.InlineKeyboardButton("شراء", callback_data=f"buy_{item['_id']}"))
 
     bot.send_message(call.message.chat.id,
-        f"{item['name']}\n💰 {item['price']}\n📦 {len(items)}",
+        f"📦 المنتج: {item['name']}\n💰 السعر: {item['price']}\n📊 الكمية المتوفرة: {len(items)}",
         reply_markup=kb)
 
 # ========= BUY =========
@@ -125,50 +132,57 @@ def buy(call):
     uid = call.message.chat.id
     pid = call.data.split("_")[1]
 
+    user = users.find_one({"_id": uid})
+
+    # 1. فحص المنتج قبل حظره للتأكد من السعر
+    item_preview = stock.find_one({"_id": ObjectId(pid), "sold": False})
+    if not item_preview:
+        return bot.answer_callback_query(call.id, "❌ نفذت الكمية")
+
+    # 2. التحقق من الرصيد أولاً
+    if user.get("balance", 0) < item_preview["price"]:
+        return bot.answer_callback_query(call.id, "❌ الرصيد غير كافي")
+
+    # 3. حجز المنتج
     item = stock.find_one_and_update(
         {"_id": ObjectId(pid), "sold": False},
         {"$set": {"sold": True}}
     )
 
     if not item:
-        return bot.answer_callback_query(call.id, "❌ انتهى")
+        return bot.answer_callback_query(call.id, "❌ نفذت الكمية")
 
-    user = users.find_one({"_id": uid})
-
-    if user["balance"] < item["price"]:
-        stock.update_one({"_id": item["_id"]}, {"$set": {"sold": False}})
-        return bot.answer_callback_query(call.id, "❌ الرصيد غير كافي")
-
+    # 4. خصم الرصيد
     users.update_one({"_id": uid}, {"$inc": {"balance": -item["price"]}})
 
-    bot.send_message(uid, f"🎫 الكود:\n{item['code']}")
+    bot.send_message(uid, f"✅ تم الشراء بنجاح!\n\n🎫 الكود الخاص بك:\n`{item['code']}`", parse_mode="Markdown")
 
     # إشعار الأدمن
     bot.send_message(ADMIN_ID,
-        f"🛒 شراء\n👤 {uid}\n📦 {item['name']}\n💰 {item['price']}")
+        f"🛒 عملية شراء جديدة\n👤 المشتري: {uid}\n📦 المنتج: {item['name']}\n💰 السعر: {item['price']}")
 
 # ========= ADMIN =========
 @bot.message_handler(commands=['admin'])
 def admin(msg):
     if msg.chat.id != ADMIN_ID:
-        return bot.send_message(msg.chat.id, "❌ غير مصرح")
+        return bot.send_message(msg.chat.id, "❌ غير مصرح لك")
 
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("👥 المستخدمين", "🎫 توليد")
     kb.add("➕ منتج", "💳 شحن يدوي")
 
-    bot.send_message(msg.chat.id, "👑 لوحة الأدمن", reply_markup=kb)
+    bot.send_message(msg.chat.id, "👑 مرحباً بك في لوحة تحكم الأدمن", reply_markup=kb)
 
 # ===== USERS =====
 @bot.message_handler(func=lambda m: m.text == "👥 المستخدمين")
 def users_list(msg):
     if msg.chat.id != ADMIN_ID: return
 
-    text = "👥 المستخدمين:\n\n"
+    text = "👥 قائمة آخر المستخدمين:\n\n"
     for u in users.find().limit(30):
-        text += f"{u['_id']} | {u.get('balance',0)}\n"
+        text += f"ID: `{u['_id']}` | الرصيد: {u.get('balance',0)}\n"
 
-    bot.send_message(msg.chat.id, text)
+    bot.send_message(msg.chat.id, text, parse_mode="Markdown")
 
 # ===== ADD PRODUCT =====
 @bot.message_handler(func=lambda m: m.text == "➕ منتج")
@@ -176,11 +190,14 @@ def add_product(msg):
     if msg.chat.id != ADMIN_ID: return
 
     bot.send_message(msg.chat.id,
-        "cat:sub:name:price\ncode1\ncode2")
+        "أرسل البيانات بالصيغة التالية:\n\nالقسم:الفئة:الاسم:السعر\nكود1\nكود2\nكود3")
 
     bot.register_next_step_handler(msg, save_product)
 
 def save_product(msg):
+    if msg.text in ["👥 المستخدمين", "🎫 توليد", "➕ منتج", "💳 شحن يدوي"]:
+        return bot.send_message(msg.chat.id, "تم الإلغاء.")
+
     try:
         lines = msg.text.split("\n")
         cat, sub, name, price = lines[0].split(":")
@@ -188,57 +205,73 @@ def save_product(msg):
 
         docs = []
         for c in lines[1:]:
+            if c.strip() == "": continue
             docs.append({
-                "category": cat,
-                "subcategory": sub,
-                "name": name,
+                "category": cat.strip(),
+                "subcategory": sub.strip(),
+                "name": name.strip(),
                 "price": price,
-                "code": c,
+                "code": c.strip(),
                 "sold": False
             })
 
-        stock.insert_many(docs)
-        bot.send_message(msg.chat.id, f"✅ تم إضافة {len(docs)} كود")
+        if docs:
+            stock.insert_many(docs)
+            bot.send_message(msg.chat.id, f"✅ تم إضافة {len(docs)} كود بنجاح للمنتج {name}")
+        else:
+            bot.send_message(msg.chat.id, "❌ لم يتم إرسال أي أكواد.")
 
     except Exception as e:
-        bot.send_message(msg.chat.id, f"❌ خطأ\n{e}")
+        bot.send_message(msg.chat.id, f"❌ حدث خطأ في التنسيق:\n{e}")
 
 # ===== GENERATE CARDS =====
 @bot.message_handler(func=lambda m: m.text == "🎫 توليد")
 def gen_cards(msg):
     if msg.chat.id != ADMIN_ID: return
-    bot.send_message(msg.chat.id, "عدد:قيمة")
+    bot.send_message(msg.chat.id, "أرسل (العدد:القيمة)\nمثال: 10:50")
     bot.register_next_step_handler(msg, create_cards)
 
 def create_cards(msg):
+    if msg.text in ["👥 المستخدمين", "🎫 توليد", "➕ منتج", "💳 شحن يدوي"]:
+        return bot.send_message(msg.chat.id, "تم الإلغاء.")
+
     try:
         count, val = map(int, msg.text.split(":"))
         arr = []
+        codes_text = f"✅ تم توليد {count} كروت بقيمة {val}:\n\n"
 
         for _ in range(count):
-            code = ''.join(random.choices(string.ascii_uppercase+string.digits,k=12))
-            arr.append({"code":code,"value":val,"used":False})
+            code = ''.join(random.choices(string.ascii_uppercase+string.digits, k=12))
+            arr.append({"code":code, "value":val, "used":False})
+            codes_text += f"`{code}`\n"
 
         cards.insert_many(arr)
-        bot.send_message(msg.chat.id, "✅ تم")
+        bot.send_message(msg.chat.id, codes_text, parse_mode="Markdown")
 
-    except:
-        bot.send_message(msg.chat.id, "❌ خطأ")
+    except Exception as e:
+        bot.send_message(msg.chat.id, f"❌ خطأ في الإدخال. تأكد من الصيغة (العدد:القيمة)")
 
 # ===== DIRECT CHARGE =====
 @bot.message_handler(func=lambda m: m.text == "💳 شحن يدوي")
 def direct(msg):
     if msg.chat.id != ADMIN_ID: return
-    bot.send_message(msg.chat.id, "id:amount")
+    bot.send_message(msg.chat.id, "أرسل (ID_المستخدم:القيمة)")
     bot.register_next_step_handler(msg, do_charge)
 
 def do_charge(msg):
+    if msg.text in ["👥 المستخدمين", "🎫 توليد", "➕ منتج", "💳 شحن يدوي"]:
+        return bot.send_message(msg.chat.id, "تم الإلغاء.")
+
     try:
-        uid, amt = msg.text.split(":")
-        users.update_one({"_id": int(uid)}, {"$inc": {"balance": int(amt)}})
-        bot.send_message(msg.chat.id, "✅ تم")
+        uid, amt = map(int, msg.text.split(":"))
+        result = users.update_one({"_id": uid}, {"$inc": {"balance": amt}})
+        if result.matched_count > 0:
+            bot.send_message(msg.chat.id, "✅ تم الشحن اليدوي بنجاح")
+            bot.send_message(uid, f"🎁 تم شحن رصيدك بمبلغ {amt} من قِبل الإدارة")
+        else:
+            bot.send_message(msg.chat.id, "❌ لم يتم العثور على المستخدم")
     except:
-        bot.send_message(msg.chat.id, "❌ خطأ")
+        bot.send_message(msg.chat.id, "❌ خطأ في الإدخال")
 
 # ========= RUN =========
 print("🚀 BOT STARTED")
