@@ -9,6 +9,7 @@ import string
 from flask import Flask
 from threading import Thread
 import logging
+import time
 
 # --- 1. إعداد سيرفر Flask لتجاوز إغلاق منصة Render ---
 app = Flask(__name__)
@@ -18,7 +19,6 @@ def home():
     return "<h1>Al-Ahram System is Fully Operational</h1>"
 
 def run_flask():
-    # 🌟 التعديل هنا: جعلنا البورت الافتراضي 10000 ليتوافق مع Render
     port = int(os.environ.get('PORT', 10000))
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
@@ -154,22 +154,68 @@ def process_card_check(message):
             users_col.update_one({"_id": uid}, {"$set": {"failed_attempts": fails}})
             bot.send_message(uid, f"❌ كود خاطئ أو مستخدم مسبقاً! لديك {3 - fails} محاولات متبقية قبل تجميد الحساب.")
 
-# --- 6. نظام شراء الأكواد ---
+# --- 6. نظام الأقسام وشراء الأكواد ---
 @bot.message_handler(func=lambda m: m.text == "🛒 شراء كود")
-def shop_menu(message):
+def shop_categories(message):
     uid = message.chat.id
     if not is_account_active(uid): return
     items = list(stock_col.find({"sold": False}))
     if not items:
         return bot.send_message(uid, "⚠️ لا توجد منتجات متوفرة حالياً في المخزن.")
     
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    displayed = set()
+    # استخراج الفئات المتاحة (وإعطاء المنتجات القديمة فئة "عام")
+    categories = set(item.get('category', 'عام') for item in items)
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for cat in categories:
+        markup.add(types.InlineKeyboardButton(f"📁 {cat}", callback_data=f"showcat_{cat}"))
+        
+    bot.send_message(uid, "🛒 **أقسام المتجر:**\nاختر القسم الذي تريده من الأسفل:", reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("showcat_"))
+def show_category_items(call):
+    cat_name = call.data.split("_")[1]
+    uid = call.message.chat.id
+    
+    # جلب المنتجات التابعة للقسم المختار
+    if cat_name == 'عام':
+        items = list(stock_col.find({"sold": False, "$or": [{"category": cat_name}, {"category": {"$exists": False}}]}))
+    else:
+        items = list(stock_col.find({"sold": False, "category": cat_name}))
+
+    if not items:
+        return bot.answer_callback_query(call.id, "⚠️ لا توجد منتجات متاحة في هذا القسم حالياً.", show_alert=True)
+    
+    bot.delete_message(uid, call.message.message_id)
+    bot.send_message(uid, f"📦 **قسم:** {cat_name}\nجاري تحميل المنتجات...", parse_mode="Markdown")
+    
+    unique_products = {}
     for item in items:
-        if item['name'] not in displayed:
-            markup.add(types.InlineKeyboardButton(f"{item['name']} - {item['price']} د.ل", callback_data=f"buy_{item['name']}"))
-            displayed.add(item['name'])
-    bot.send_message(uid, "🛒 **المنتجات المتوفرة:**\nاختر المنتج الذي ترغب في شرائه:", reply_markup=markup, parse_mode="Markdown")
+        name = item['name']
+        if name not in unique_products:
+            unique_products[name] = {
+                'price': item['price'],
+                'image_url': item.get('image_url', ''),
+                'count': 1
+            }
+        else:
+            unique_products[name]['count'] += 1
+
+    for name, data in unique_products.items():
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(f"🛒 شراء ({data['price']} د.ل)", callback_data=f"buy_{name}"))
+        
+        caption = (f"📦 **المنتج:** {name}\n"
+                   f"💰 **السعر:** {data['price']} د.ل\n"
+                   f"📊 **المتوفر:** {data['count']} كود")
+        
+        if data['image_url'] and data['image_url'].startswith("http"):
+            try:
+                bot.send_photo(uid, data['image_url'], caption=caption, reply_markup=markup, parse_mode="Markdown")
+            except Exception:
+                bot.send_message(uid, caption, reply_markup=markup, parse_mode="Markdown")
+        else:
+            bot.send_message(uid, caption, reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
 def finalize_purchase(call):
@@ -187,6 +233,7 @@ def finalize_purchase(call):
         stock_col.update_one({"_id": item['_id']}, {"$set": {"sold": True, "buyer": uid, "date": datetime.datetime.now()}})
         users_col.update_one({"_id": uid}, {"$inc": {"balance": -item['price']}})
         logs_col.insert_one({"uid": uid, "type": "buy", "price": item['price'], "date": datetime.datetime.now(), "item": p_name})
+        
         bot.send_message(uid, f"✅ تم شراء **{p_name}** بنجاح!\n🎫 كود المنتج: `{item['code']}`", parse_mode="Markdown")
         bot.answer_callback_query(call.id, "تم الشراء بنجاح!")
         bot.delete_message(uid, call.message.message_id)
@@ -206,7 +253,7 @@ def admin_panel(message):
     )
     markup.add(
         types.InlineKeyboardButton("🎫 توليد كروت شحن", callback_data="adm_gen"),
-        types.InlineKeyboardButton("➕ إضافة بضاعة (مجموعة)", callback_data="adm_stock_bulk")
+        types.InlineKeyboardButton("➕ إضافة بضاعة متقدمة", callback_data="adm_stock_bulk")
     )
     bot.send_message(ADMIN_ID, "🛠 **لوحة تحكم الإدارة:**", reply_markup=markup, parse_mode="Markdown")
 
@@ -253,7 +300,15 @@ def admin_callbacks(call):
         bot.register_next_step_handler(msg, admin_generate_cards)
 
     elif call.data == "adm_stock_bulk":
-        msg = bot.send_message(ADMIN_ID, "➕ **إضافة مجموعة أكواد دفعة واحدة:**\n\nأرسل (اسم المنتج:السعر) في السطر الأول، ثم أرسل الأكواد في الأسطر التالية (كود في كل سطر).\n\n**مثال:**\nببجي 60 شدة:5\nPUBG-12345\nPUBG-67890", parse_mode="Markdown")
+        msg_text = ("➕ **إضافة منتجات بأقسام وصور:**\n\n"
+                    "أرسل (القسم:الاسم:السعر:رابط_الصورة) في السطر الأول، ثم أرسل الأكواد في الأسطر التالية.\n\n"
+                    "**أمثلة:**\n"
+                    "اشتراكات:WATCH IT شهر:20:https://example.com/watchit.jpg\n"
+                    "أو\n"
+                    "اشتراكات:Shahid VIP شهر:25:https://example.com/shahid.jpg\n"
+                    "Code-1\n"
+                    "Code-2")
+        msg = bot.send_message(ADMIN_ID, msg_text, parse_mode="Markdown", disable_web_page_preview=True)
         bot.register_next_step_handler(msg, admin_add_stock_bulk)
 
 def show_user_panel(uid):
@@ -337,12 +392,26 @@ def admin_generate_cards(message):
 def admin_add_stock_bulk(message):
     lines = message.text.strip().split('\n')
     if len(lines) < 2:
-        bot.send_message(ADMIN_ID, "❌ إدخال خاطئ! يجب أن يحتوي السطر الأول على (الاسم:السعر)، والأسطر التالية على الأكواد.")
+        bot.send_message(ADMIN_ID, "❌ إدخال خاطئ! السطر الأول يجب أن يحتوي على (القسم:الاسم:السعر:رابط الصورة).")
         return
     try:
         parts = lines[0].split(":")
-        name = parts[0].strip()
-        price = int(parts[1].strip())
+        
+        # حماية إضافية في حال نسي المدير كتابة الفئة أو رابط الصورة
+        if len(parts) < 3:
+            bot.send_message(ADMIN_ID, "❌ إدخال ناقص! تأكد من التنسيق: القسم:الاسم:السعر:رابط_الصورة")
+            return
+            
+        if len(parts) == 3: # إذا أدخل (الاسم:السعر:رابط) فقط، نضع الفئة "عام"
+            category = "عام"
+            name = parts[0].strip()
+            price = int(parts[1].strip())
+            image_url = ":".join(parts[2:]).strip()
+        else:
+            category = parts[0].strip()
+            name = parts[1].strip()
+            price = int(parts[2].strip())
+            image_url = ":".join(parts[3:]).strip() # إعادة دمج الرابط
         
         codes = [line.strip() for line in lines[1:] if line.strip()]
         
@@ -350,12 +419,12 @@ def admin_add_stock_bulk(message):
              bot.send_message(ADMIN_ID, "❌ لم يتم العثور على أكواد في الرسالة.")
              return
 
-        docs = [{"name": name, "price": price, "code": c, "sold": False, "added_at": datetime.datetime.now()} for c in codes]
+        docs = [{"category": category, "name": name, "price": price, "image_url": image_url, "code": c, "sold": False, "added_at": datetime.datetime.now()} for c in codes]
         stock_col.insert_many(docs)
         
-        bot.send_message(ADMIN_ID, f"✅ تم إضافة **{len(codes)}** أكواد لمنتج **{name}** بسعر {price} د.ل بنجاح.", parse_mode="Markdown")
+        bot.send_message(ADMIN_ID, f"✅ تم إضافة **{len(codes)}** أكواد بنجاح.\n📁 **القسم:** {category}\n📦 **المنتج:** {name}\n💰 **السعر:** {price} د.ل\n🖼️ تم ربط الصورة بنجاح.", parse_mode="Markdown")
     except ValueError:
-        bot.send_message(ADMIN_ID, "❌ خطأ في تنسيق السطر الأول! يرجى التأكد من استخدام (الاسم:السعر).")
+        bot.send_message(ADMIN_ID, "❌ خطأ في السعر! تأكد من كتابة السعر كأرقام فقط.")
     except Exception as e:
         bot.send_message(ADMIN_ID, f"❌ حدث خطأ غير متوقع: {e}")
 
@@ -363,14 +432,13 @@ def admin_add_stock_bulk(message):
 def run_bot():
     try:
         bot.remove_webhook()
-        print("🚀 Al-Ahram Bot is Running Successfully with New Features...")
+        print("⏳ Waiting 5 seconds to clear old instances...")
+        time.sleep(5) 
+        print("🚀 Al-Ahram Bot is Running Successfully with Categories...")
         bot.infinity_polling(skip_pending=True)
     except Exception as e:
         print(f"❌ حدث خطأ أثناء تشغيل البوت: {e}")
 
 if __name__ == "__main__":
-    # 1. تشغيل البوت في خيط (Thread) منفصل
     Thread(target=run_bot).start()
-    
-    # 2. تشغيل سيرفر Flask في المسار الرئيسي لكي يكتشفه Render بنجاح
     run_flask()
