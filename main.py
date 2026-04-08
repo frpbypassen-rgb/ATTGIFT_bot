@@ -139,7 +139,7 @@ def client_reports(call):
     if not u: return bot.answer_callback_query(call.id, "حسابك مجمد.", show_alert=True)
 
     if call.data == "client_purchases":
-        history = list(transactions.find({"uid": uid, "type": "شراء"}).sort("_id", -1).limit(10))
+        history = list(transactions.find({"uid": uid, "type": "شراء جملة"}).sort("_id", -1).limit(10))
         if not history: return bot.answer_callback_query(call.id, "لا توجد مشتريات.", show_alert=True)
         report_text = "🛒 **آخر 10 مشتريات:**\n\n"
         for t in history:
@@ -151,8 +151,8 @@ def client_reports(call):
         if not history: return bot.answer_callback_query(call.id, "لا توجد عمليات.", show_alert=True)
         report_text = "🧾 **كشف حساب (آخر 20):**\n\n"
         for t in history:
-            if t["type"] == "شراء":
-                report_text += f"🔴 خصم | {t['date']} | شراء {t['item_name']} | -{t['price']}\n"
+            if "شراء" in t["type"]:
+                report_text += f"🔴 خصم | {t['date']} | {t['item_name']} | -{t['price']}\n"
             else:
                 report_text += f"🟢 إضافة | {t['date']} | {t['type']} | +{t['amount']}\n"
                 
@@ -189,9 +189,9 @@ def check_card(msg):
 
     users.update_one({"_id": uid}, {"$inc": {"balance": card["value"]}, "$set": {"failed_attempts": 0}})
     transactions.insert_one({"uid": uid, "type": "شحن كارت", "amount": card["value"], "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")})
-    bot.send_message(uid, f"✅ تم شحن رصيدك بقيمة {card['value']} بنجاح")
+    bot.send_message(uid, f"✅ تم شحن رصيدك بقيمة {card['value']} بنجاح\n(السيريال: {card.get('serial', 'غير متوفر')})")
 
-# ========= SHOP =========
+# ========= BULK SHOP =========
 @bot.message_handler(func=lambda m: m.text == "🛒 شراء")
 def shop(msg):
     if not check_user_access(msg.chat.id): return
@@ -213,51 +213,84 @@ def cat(call):
 def sub(call):
     _, cat_name, sub_name = call.data.split("_",2)
     items = list(stock.find({"category": cat_name, "subcategory": sub_name, "sold": False}))
-    if not items: return bot.answer_callback_query(call.id, "❌ نفذت الكمية")
-    item = items[0]
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("شراء", callback_data=f"buy_{item['_id']}"))
-    bot.send_message(call.message.chat.id, f"📦 المنتج: {item['name']}\n💰 السعر: {item['price']}\n📊 الكمية: {len(items)}", reply_markup=kb)
+    count = len(items)
 
-# ========= BUY =========
-@bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
-def buy(call):
+    if count < 10:
+        return bot.answer_callback_query(call.id, "❌ الكمية المتوفرة أقل من 10 (الحد الأدنى للبيع).", show_alert=True)
+
+    item = items[0]
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    btns = []
+    
+    # توليد أزرار للمضاعفات 10، 20، 30 بناءً على المخزون المتاح
+    for q in [10, 20, 30, 40, 50, 100, 200]:
+        if count >= q:
+            btns.append(types.InlineKeyboardButton(f"شراء {q} كود", callback_data=f"bulk_{item['_id']}_{q}"))
+    
+    kb.add(*btns)
+    bot.send_message(call.message.chat.id, f"📦 المنتج: {item['name']}\n💰 سعر الكود الواحد: {item['price']}\n📊 الكمية المتوفرة: {count}\n\nيرجى تحديد الكمية المطلوبة (البيع بالجملة فقط):", reply_markup=kb)
+
+# ========= BULK BUY LOGIC =========
+@bot.callback_query_handler(func=lambda c: c.data.startswith("bulk_"))
+def bulk_buy(call):
     uid = call.message.chat.id
-    pid = call.data.split("_")[1]
+    _, pid, qty_str = call.data.split("_")
+    qty = int(qty_str)
 
     user = check_user_access(uid)
     if not user: return bot.answer_callback_query(call.id, "❌ حسابك غير مؤهل.", show_alert=True)
 
-    item_preview = stock.find_one({"_id": ObjectId(pid), "sold": False})
-    if not item_preview: return bot.answer_callback_query(call.id, "❌ نفذت الكمية")
-    if user.get("balance", 0) < item_preview["price"]: return bot.answer_callback_query(call.id, "❌ الرصيد غير كافي")
+    ref_item = stock.find_one({"_id": ObjectId(pid)})
+    if not ref_item: return bot.answer_callback_query(call.id, "❌ المنتج غير موجود.")
 
-    item = stock.find_one_and_update({"_id": ObjectId(pid), "sold": False}, {"$set": {"sold": True}})
-    if not item: return bot.answer_callback_query(call.id, "❌ نفذت الكمية")
+    name = ref_item["name"]
+    price_per_unit = ref_item["price"]
+    total_price = price_per_unit * qty
+    
+    if user.get("balance", 0) < total_price: 
+        return bot.answer_callback_query(call.id, f"❌ رصيدك غير كافي. المطلوب لإتمام العملية: {total_price}", show_alert=True)
 
-    users.update_one({"_id": uid}, {"$inc": {"balance": -item["price"]}})
+    # البحث عن الكمية المطلوبة لنفس المنتج
+    available_items = list(stock.find({"name": name, "sold": False}).limit(qty))
+    if len(available_items) < qty: 
+        return bot.answer_callback_query(call.id, "❌ نفذت الكمية المطلوبة أثناء محاولتك الشراء.", show_alert=True)
 
+    item_ids = [i["_id"] for i in available_items]
+
+    # حجز الأكواد
+    res = stock.update_many({"_id": {"$in": item_ids}, "sold": False}, {"$set": {"sold": True}})
+    if res.modified_count < qty:
+        stock.update_many({"_id": {"$in": item_ids}}, {"$set": {"sold": False}})
+        return bot.answer_callback_query(call.id, "❌ حدث تعارض في المخزون، حاول مرة أخرى.", show_alert=True)
+
+    # خصم الرصيد
+    users.update_one({"_id": uid}, {"$inc": {"balance": -total_price}})
+
+    # حساب التكلفة والمربح والفاتورة
+    total_cost = sum([i.get("cost", 0) for i in available_items])
+    profit = total_price - total_cost
     order_id = get_next_order_id()
-    cost_price = item.get("cost", 0)
-    profit = item["price"] - cost_price
     dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     transactions.insert_one({
-        "order_id": order_id, "uid": uid, "phone": user.get('phone'), "type": "شراء", "item_name": item['name'],
-        "price": item["price"], "cost": cost_price, "profit": profit, "date": dt_now
+        "order_id": order_id, "uid": uid, "phone": user.get('phone'), "type": "شراء جملة", 
+        "item_name": f"{name} (x{qty})", "price": total_price, "cost": total_cost, "profit": profit, "date": dt_now
     })
 
     if SHEET_WEBHOOK_URL and SHEET_WEBHOOK_URL.startswith("http"):
         try:
             requests.post(SHEET_WEBHOOK_URL, json={
                 "order_id": order_id, "date": dt_now, "phone": user.get('phone'),
-                "item_name": item['name'], "price": item["price"], "cost": cost_price, "profit": profit
+                "item_name": f"{name} (x{qty})", "price": total_price, "cost": total_cost, "profit": profit
             }, timeout=3)
         except Exception as e:
-            print("Sheet Error:", e)
+            pass
 
-    bot.send_message(uid, f"✅ تم الشراء بنجاح!\n🧾 رقم الفاتورة: #{order_id}\n\n🎫 الكود الخاص بك:\n`{item['code']}`", parse_mode="Markdown")
-    bot.send_message(ADMIN_ID, f"🛒 شراء جديد | فاتورة #{order_id}\n👤 العميل: `{uid}`\n📱 الهاتف: {user.get('phone')}\n📦 المنتج: {item['name']}\n💰 السعر: {item['price']}\n💵 المربح: {profit}", parse_mode="Markdown")
+    # تجميع الأكواد وإرسالها
+    codes_text = "\n".join([f"`{i['code']}`" for i in available_items])
+    bot.send_message(uid, f"✅ تم شراء {qty} كود بنجاح!\n🧾 رقم الفاتورة: #{order_id}\n💰 إجمالي المخصوم: {total_price}\n\n🎫 الأكواد الخاصة بك:\n{codes_text}", parse_mode="Markdown")
+    
+    bot.send_message(ADMIN_ID, f"🛒 شراء جملة جديد | فاتورة #{order_id}\n👤 العميل: `{uid}`\n📱 الهاتف: {user.get('phone')}\n📦 المنتج: {name} (الكمية {qty})\n💰 الإجمالي: {total_price}\n💵 المربح: {profit}", parse_mode="Markdown")
 
 # ========= ADMIN =========
 @bot.message_handler(commands=['admin'])
@@ -274,7 +307,7 @@ def back_to_store(msg):
 @bot.message_handler(func=lambda m: m.text == "🧾 سجل الفواتير")
 def invoices_log(msg):
     if msg.chat.id != ADMIN_ID: return
-    history = list(transactions.find({"type": "شراء", "order_id": {"$exists": True}}).sort("_id", -1).limit(40))
+    history = list(transactions.find({"type": "شراء جملة", "order_id": {"$exists": True}}).sort("_id", -1).limit(40))
     if not history: return bot.send_message(msg.chat.id, "لا توجد فواتير مبيعات حتى الآن.")
     
     text = "🧾 **سجل آخر 40 فاتورة:**\n\n"
@@ -335,11 +368,11 @@ def admin_customer_actions(call):
         if not history: return bot.answer_callback_query(call.id, "لا يوجد عمليات.", show_alert=True)
         report_text = f"📊 آخر عمليات العميل `{uid}`:\n\n"
         for t in history:
-            if t["type"] == "شراء": report_text += f"▪️ {t['date']} | 🛒 {t['item_name']} | بـ {t['price']}\n"
+            if "شراء" in t["type"]: report_text += f"▪️ {t['date']} | 🛒 {t['item_name']} | بـ {t['price']}\n"
             else: report_text += f"▪️ {t['date']} | 💳 {t['type']} | بـ {t['amount']}\n"
         bot.send_message(call.message.chat.id, report_text, parse_mode="Markdown")
 
-# ===== ADD PRODUCT =====
+# ===== ADD PRODUCT (WITH COST) =====
 @bot.message_handler(func=lambda m: m.text == "➕ منتج")
 def add_product(msg):
     if msg.chat.id != ADMIN_ID: return
@@ -381,70 +414,4 @@ def do_set_balance(msg):
         if u:
             new_bal = int(val_str.strip())
             users.update_one({"_id": u["_id"]}, {"$set": {"balance": new_bal}})
-            transactions.insert_one({"uid": u["_id"], "type": "ضبط رصيد", "amount": new_bal, "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")})
-            bot.send_message(msg.chat.id, f"✅ تم ضبط رصيد العميل {u.get('phone')} ليصبح {new_bal}")
-            bot.send_message(u["_id"], f"⚙️ تم تحديث رصيدك من قبل الإدارة ليصبح: {new_bal}")
-        else:
-            bot.send_message(msg.chat.id, "❌ لم يتم العثور على العميل.")
-    except:
-        bot.send_message(msg.chat.id, "❌ خطأ في الإدخال.")
-
-# ===== DIRECT CHARGE =====
-@bot.message_handler(func=lambda m: m.text == "💳 شحن يدوي")
-def direct(msg):
-    if msg.chat.id != ADMIN_ID: return
-    bot.send_message(msg.chat.id, "أرسل (رقم_الهاتف:قيمة_الإضافة)\nمثال: 0940719000:50")
-    bot.register_next_step_handler(msg, do_charge)
-
-def do_charge(msg):
-    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
-    try:
-        phone_str, amt_str = msg.text.split(":")
-        u = find_customer(phone_str)
-        if u:
-            amt = int(amt_str.strip())
-            users.update_one({"_id": u["_id"]}, {"$inc": {"balance": amt}})
-            transactions.insert_one({"uid": u["_id"], "type": "شحن إضافي", "amount": amt, "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")})
-            bot.send_message(msg.chat.id, f"✅ تم إضافة {amt} لرصيد العميل {u.get('phone')}")
-            bot.send_message(u["_id"], f"🎁 تم إضافة {amt} لرصيدك من قِبل الإدارة")
-        else:
-            bot.send_message(msg.chat.id, "❌ لم يتم العثور على العميل.")
-    except:
-        bot.send_message(msg.chat.id, "❌ خطأ في الإدخال.")
-
-# ===== GENERATE CARDS =====
-@bot.message_handler(func=lambda m: m.text == "🎫 توليد")
-def gen_cards(msg):
-    if msg.chat.id != ADMIN_ID: return
-    bot.send_message(msg.chat.id, "أرسل (العدد:القيمة)")
-    bot.register_next_step_handler(msg, create_cards)
-
-def create_cards(msg):
-    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
-    try:
-        count, val = map(int, msg.text.split(":"))
-        arr = []
-        txt = f"✅ تم توليد {count} كروت بقيمة {val}:\n\n"
-        for _ in range(count):
-            code = ''.join(random.choices(string.ascii_uppercase+string.digits, k=12))
-            arr.append({"code":code, "value":val, "used":False})
-            txt += f"`{code}`\n"
-        cards.insert_many(arr)
-        bot.send_message(msg.chat.id, txt, parse_mode="Markdown")
-    except:
-        bot.send_message(msg.chat.id, "❌ خطأ في الإدخال.")
-
-# ========= DUMMY WEB SERVER FOR RENDER =========
-app = Flask(__name__)
-@app.route('/')
-def home(): return "Bot is running perfectly!"
-def run_web_server(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-
-# ========= RUN =========
-if __name__ == "__main__":
-    threading.Thread(target=run_web_server).start()
-    bot.remove_webhook()
-    print("⏳ Waiting for old instance to shut down...")
-    time.sleep(5)
-    print("🚀 PRO BOT STARTED")
-    bot.infinity_polling()
+            transactions.insert_one({"uid": u["_id"], "type": "ضبط رصيد", "amount": new_bal, "date": datetime.datetime.
