@@ -23,69 +23,87 @@ db = client["AlAhram_DB"]
 users = db["users"]
 stock = db["stock"]
 cards = db["cards"]
-transactions = db["transactions"] # مجموعة جديدة لتسجيل التقارير
+transactions = db["transactions"]
 
 # كلمات لإلغاء أي عملية إدخال إذا ضغط المستخدم على أزرار القوائم
 MENU_BUTTONS = ["🛒 شراء", "💳 شحن", "👤 حسابي", "👥 المستخدمين", "🎫 توليد", "➕ منتج", "💳 شحن يدوي", "⚙️ إدارة عميل"]
 
-# ========= MENU =========
+# ========= MENUS =========
 def menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("🛒 شراء", "💳 شحن")
     kb.add("👤 حسابي")
     return kb
 
-# ========= START =========
+def contact_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    # request_contact=True تجبر تيليجرام على إرسال رقم هاتف الحساب
+    kb.add(types.KeyboardButton("إرسال رقم الهاتف 📱", request_contact=True))
+    return kb
+
+# ========= HELPER FUNCTION =========
+def check_user_access(uid):
+    """دالة للتحقق من أن المستخدم مسجل، أرسل رقمه، وغير مجمد"""
+    u = users.find_one({"_id": uid})
+    if not u or not u.get("phone"):
+        bot.send_message(uid, "⚠️ يجب عليك مشاركة رقم هاتف حسابك أولاً لتتمكن من استخدام المتجر.", reply_markup=contact_menu())
+        return None
+    if u.get("status") != "active":
+        bot.send_message(uid, "❌ حسابك مجمد. تواصل مع الإدارة.")
+        return None
+    return u
+
+# ========= START & CONTACT HANDLER =========
 @bot.message_handler(commands=['start'])
 def start(msg):
     uid = msg.chat.id
+    u = users.find_one({"_id": uid})
 
-    if not users.find_one({"_id": uid}):
+    if not u:
         users.insert_one({
             "_id": uid,
             "balance": 0,
-            "status": "active", # active أو frozen
-            "phone": None,      # رقم الهاتف اختياري
+            "status": "active",
+            "phone": None,
             "join": datetime.datetime.now()
         })
+        u = {"phone": None}
 
-    bot.send_message(uid, "👋 مرحباً بك في المتجر", reply_markup=menu())
+    if not u.get("phone"):
+        bot.send_message(uid, "👋 مرحباً بك في المتجر!\n\nلإكمال التسجيل، يرجى الضغط على الزر بالأسفل لمشاركة رقم هاتفك المرتبط بتيليجرام.", reply_markup=contact_menu())
+    else:
+        bot.send_message(uid, "👋 مرحباً بك مجدداً في المتجر", reply_markup=menu())
 
-# ========= ACCOUNT (اختياري رقم الهاتف) =========
+@bot.message_handler(content_types=['contact'])
+def handle_contact(msg):
+    uid = msg.chat.id
+    
+    # تحقق أمني: التأكد من أن جهة الاتصال المرسلة تخص نفس المستخدم، وليس رقم شخص آخر
+    if msg.contact.user_id != uid:
+        return bot.send_message(uid, "❌ الرجاء استخدام الزر بالأسفل لإرسال رقم هاتفك الخاص بحسابك، وليس جهة اتصال أخرى.", reply_markup=contact_menu())
+    
+    phone = msg.contact.phone_number
+    # إضافة علامة + إذا لم تكن موجودة
+    if not phone.startswith('+'):
+        phone = '+' + phone
+
+    users.update_one({"_id": uid}, {"$set": {"phone": phone}})
+    bot.send_message(uid, f"✅ تم تفعيل حسابك بنجاح!\nرقمك المسجل: {phone}", reply_markup=menu())
+
+# ========= ACCOUNT =========
 @bot.message_handler(func=lambda m: m.text == "👤 حسابي")
 def account(msg):
-    u = users.find_one({"_id": msg.chat.id})
-    if u:
-        phone = u.get("phone") if u.get("phone") else "غير محدد"
-        status_text = "نشط ✅" if u.get("status") == "active" else "مجمد ❄️"
-        
-        text = f"🆔 ID: `{msg.chat.id}`\n📱 الهاتف: {phone}\n💰 رصيدك: {u.get('balance',0)}\nحالة الحساب: {status_text}"
-        
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("📱 إضافة/تعديل رقم الهاتف", callback_data="set_phone"))
-        
-        bot.send_message(msg.chat.id, text, reply_markup=kb, parse_mode="Markdown")
-    else:
-        bot.send_message(msg.chat.id, "❌ حسابك غير موجود، أرسل /start")
+    u = check_user_access(msg.chat.id)
+    if not u: return
 
-@bot.callback_query_handler(func=lambda c: c.data == "set_phone")
-def set_phone(call):
-    msg = bot.send_message(call.message.chat.id, "أرسل رقم هاتفك الآن:")
-    bot.register_next_step_handler(msg, save_phone)
-
-def save_phone(msg):
-    if msg.text in MENU_BUTTONS:
-        return bot.send_message(msg.chat.id, "تم إلغاء إضافة الرقم.")
-    
-    users.update_one({"_id": msg.chat.id}, {"$set": {"phone": msg.text.strip()}})
-    bot.send_message(msg.chat.id, "✅ تم حفظ رقم الهاتف بنجاح.")
+    status_text = "نشط ✅" if u.get("status") == "active" else "مجمد ❄️"
+    text = f"🆔 ID: `{msg.chat.id}`\n📱 الهاتف: {u.get('phone')}\n💰 رصيدك: {u.get('balance',0)}\nحالة الحساب: {status_text}"
+    bot.send_message(msg.chat.id, text, parse_mode="Markdown")
 
 # ========= CHARGE =========
 @bot.message_handler(func=lambda m: m.text == "💳 شحن")
 def charge(msg):
-    u = users.find_one({"_id": msg.chat.id})
-    if u.get("status") != "active": return bot.send_message(msg.chat.id, "❌ حسابك مجمد. تواصل مع الإدارة.")
-        
+    if not check_user_access(msg.chat.id): return
     bot.send_message(msg.chat.id, "أرسل كود الشحن:")
     bot.register_next_step_handler(msg, check_card)
 
@@ -106,7 +124,6 @@ def check_card(msg):
 
     users.update_one({"_id": uid}, {"$inc": {"balance": card["value"]}})
     
-    # تسجيل العملية في التقارير
     transactions.insert_one({
         "uid": uid,
         "type": "شحن كارت",
@@ -119,11 +136,9 @@ def check_card(msg):
 # ========= SHOP =========
 @bot.message_handler(func=lambda m: m.text == "🛒 شراء")
 def shop(msg):
-    u = users.find_one({"_id": msg.chat.id})
-    if u.get("status") != "active": return bot.send_message(msg.chat.id, "❌ حسابك مجمد. تواصل مع الإدارة.")
+    if not check_user_access(msg.chat.id): return
 
     cats = stock.distinct("category")
-
     if not cats:
         return bot.send_message(msg.chat.id, "❌ لا توجد منتجات حالياً")
 
@@ -170,6 +185,8 @@ def buy(call):
     user = users.find_one({"_id": uid})
     if user.get("status") != "active":
         return bot.answer_callback_query(call.id, "❌ حسابك مجمد.", show_alert=True)
+    if not user.get("phone"):
+        return bot.answer_callback_query(call.id, "❌ يرجى تسجيل رقم هاتفك أولاً.", show_alert=True)
 
     item_preview = stock.find_one({"_id": ObjectId(pid), "sold": False})
     if not item_preview:
@@ -188,7 +205,6 @@ def buy(call):
 
     users.update_one({"_id": uid}, {"$inc": {"balance": -item["price"]}})
 
-    # تسجيل العملية في التقارير
     transactions.insert_one({
         "uid": uid,
         "type": "شراء",
@@ -198,7 +214,7 @@ def buy(call):
     })
 
     bot.send_message(uid, f"✅ تم الشراء بنجاح!\n\n🎫 الكود الخاص بك:\n`{item['code']}`", parse_mode="Markdown")
-    bot.send_message(ADMIN_ID, f"🛒 شراء جديد\n👤 العميل: {uid}\n📦 المنتج: {item['name']}\n💰 السعر: {item['price']}")
+    bot.send_message(ADMIN_ID, f"🛒 شراء جديد\n👤 العميل: {uid}\n📱 الهاتف: {user.get('phone')}\n📦 المنتج: {item['name']}\n💰 السعر: {item['price']}")
 
 # ========= ADMIN =========
 @bot.message_handler(commands=['admin'])
@@ -220,7 +236,8 @@ def users_list(msg):
     text = "👥 قائمة آخر المستخدمين:\n\n"
     for u in users.find().sort("join", -1).limit(30):
         stat = "✅" if u.get('status') == 'active' else "❄️"
-        text += f"`{u['_id']}` | الرصيد: {u.get('balance',0)} | {stat}\n"
+        phone = u.get('phone', 'بدون رقم')
+        text += f"`{u['_id']}` | 📱 {phone} | الرصيد: {u.get('balance',0)} | {stat}\n"
 
     bot.send_message(msg.chat.id, text, parse_mode="Markdown")
 
@@ -240,7 +257,7 @@ def show_customer_panel(msg):
         if not u:
             return bot.send_message(msg.chat.id, "❌ العميل غير موجود.")
         
-        phone = u.get("phone", "غير محدد")
+        phone = u.get("phone", "لم يكمل التسجيل")
         stat_ar = "نشط" if u.get("status") == "active" else "مجمد"
         
         info = f"👤 بيانات العميل:\nID: `{uid}`\nالهاتف: {phone}\nالرصيد: {u.get('balance',0)}\nالحالة: {stat_ar}"
@@ -365,7 +382,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running with Advanced Admin Features!"
+    return "Bot is running perfectly with Mandatory Phone Verification!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
@@ -375,5 +392,5 @@ def run_web_server():
 if __name__ == "__main__":
     threading.Thread(target=run_web_server).start()
     bot.remove_webhook()
-    print("🚀 ADVANCED BOT STARTED")
+    print("🚀 BOT STARTED")
     bot.infinity_polling()
