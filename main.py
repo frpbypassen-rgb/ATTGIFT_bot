@@ -1,209 +1,174 @@
-import telebot
-from telebot import types
-from pymongo import MongoClient
-from bson import ObjectId
-import datetime
-import certifi
-from flask import Flask, request
-import os
-import time
+# ===== ADMIN PANEL FULL SYSTEM =====
 
-# ========= CONFIG =========
-API_TOKEN = '8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc'
-MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT"
-ADMIN_ID = 1262656649
-RENDER_URL = "https://attgift-bot.onrender.com"
-
-bot = telebot.TeleBot(API_TOKEN)
-
-# ========= DB =========
-client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-db = client['AlAhram_DB']
-
-users_col = db['users']
-stock_col = db['stock']
-cards_col = db['cards']
-
-# ========= FLASK =========
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "Bot Running ✅"
-
-@app.route(f"/{API_TOKEN}", methods=["POST"])
-def webhook():
-    json_str = request.get_data().decode("utf-8")
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "ok", 200
-
-# ========= MENU =========
-def menu():
-    m = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    m.add("🛒 شراء كود", "💳 شحن رصيد")
-    m.add("👤 حسابي")
-    return m
-
-# ========= START =========
-@bot.message_handler(commands=['start'])
-def start(msg):
-    uid = msg.chat.id
-
-    if not users_col.find_one({"_id": uid}):
-        users_col.insert_one({
-            "_id": uid,
-            "balance": 0,
-            "join_date": datetime.datetime.now()
-        })
-
-    bot.send_message(uid, "أهلاً بك 👋", reply_markup=menu())
-
-# ========= ACCOUNT =========
-@bot.message_handler(func=lambda m: m.text == "👤 حسابي")
-def account(msg):
-    u = users_col.find_one({"_id": msg.chat.id})
-    bot.send_message(msg.chat.id,
-        f"💰 رصيدك: {u.get('balance',0)}"
-    )
-
-# ========= CHARGE =========
-@bot.message_handler(func=lambda m: m.text == "💳 شحن رصيد")
-def charge(msg):
-    bot.send_message(msg.chat.id, "🔢 أرسل كود الشحن:")
-    bot.register_next_step_handler(msg, check_card)
-
-def check_card(msg):
-    uid = msg.chat.id
-    code = msg.text.strip()
-
-    card = cards_col.find_one_and_update(
-        {"code": code, "used": False},
-        {"$set": {"used": True, "by": uid, "date": datetime.datetime.now()}}
-    )
-
-    if card:
-        users_col.update_one({"_id": uid}, {"$inc": {"balance": card['value']}})
-        bot.send_message(uid, f"✅ تم شحن {card['value']} د.ل")
-    else:
-        bot.send_message(uid, "❌ كود غير صحيح")
-
-# ========= CATEGORIES =========
-@bot.message_handler(func=lambda m: m.text == "🛒 شراء كود")
-def categories(msg):
-    cats = stock_col.distinct("category")
-
-    kb = types.InlineKeyboardMarkup()
-    for c in cats:
-        kb.add(types.InlineKeyboardButton(c, callback_data=f"cat_{c}"))
-
-    bot.send_message(msg.chat.id, "📂 اختر القسم:", reply_markup=kb)
-
-# ========= SUB =========
-@bot.callback_query_handler(func=lambda c: c.data.startswith("cat_"))
-def subcategories(call):
-    cat = call.data.split("_",1)[1]
-
-    subs = stock_col.distinct("subcategory", {"category": cat})
-
-    kb = types.InlineKeyboardMarkup()
-    for s in subs:
-        kb.add(types.InlineKeyboardButton(s, callback_data=f"sub_{cat}_{s}"))
-
-    bot.edit_message_text("📁 اختر الفئة:",
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        reply_markup=kb
-    )
-
-# ========= PRODUCTS =========
-@bot.callback_query_handler(func=lambda c: c.data.startswith("sub_"))
-def products(call):
-    _, cat, sub = call.data.split("_",2)
-
-    items = list(stock_col.find({
-        "category": cat,
-        "subcategory": sub,
-        "sold": False
-    }))
-
-    if not items:
-        return bot.answer_callback_query(call.id, "❌ لا يوجد")
-
-    unique = {}
-
-    for i in items:
-        name = i['name']
-        if name not in unique:
-            unique[name] = {
-                "price": i['price'],
-                "count": 1,
-                "id": str(i['_id'])
-            }
-        else:
-            unique[name]['count'] += 1
-
-    for name, data in unique.items():
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton(
-            f"شراء {data['price']} د.ل",
-            callback_data=f"buy_{data['id']}"
-        ))
-
-        bot.send_message(call.message.chat.id,
-            f"📦 {name}\n💰 السعر: {data['price']}\n📊 المتوفر: {data['count']}",
-            reply_markup=kb
-        )
-
-# ========= BUY =========
-@bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
-def buy(call):
-    uid = call.message.chat.id
-    pid = call.data.split("_")[1]
-
-    user = users_col.find_one({"_id": uid})
-
-    item = stock_col.find_one_and_update(
-        {"_id": ObjectId(pid), "sold": False},
-        {"$set": {"sold": True, "buyer": uid}}
-    )
-
-    if not item:
-        return bot.answer_callback_query(call.id, "❌ انتهى")
-
-    if user['balance'] < item['price']:
-        stock_col.update_one({"_id": item['_id']}, {"$set": {"sold": False}})
-        return bot.answer_callback_query(call.id, "❌ رصيدك لا يكفي")
-
-    users_col.update_one({"_id": uid}, {"$inc": {"balance": -item['price']}})
-
-    bot.send_message(uid, f"✅ تم الشراء\n🎫 الكود:\n{item['code']}")
-
-# ========= ADMIN =========
 @bot.message_handler(commands=['admin'])
-def admin(msg):
+def admin_panel(msg):
     if msg.chat.id != ADMIN_ID:
         return bot.send_message(msg.chat.id, "❌ غير مصرح")
 
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("📊 احصائيات", "🎫 توليد كروت")
+    kb.add("💳 شحن مباشر", "➕ إضافة منتج")
+    kb.add("👥 المستخدمين", "📦 الأقسام")
+
+    bot.send_message(msg.chat.id, "👑 لوحة التحكم:", reply_markup=kb)
+
+# ========= احصائيات =========
+@bot.message_handler(func=lambda m: m.text == "📊 احصائيات")
+def stats(msg):
+    if msg.chat.id != ADMIN_ID: return
+
     users = users_col.count_documents({})
+    active = users_col.count_documents({"status": {"$ne": "banned"}})
+    banned = users_col.count_documents({"status": "banned"})
+
     stock = stock_col.count_documents({})
     sold = stock_col.count_documents({"sold": True})
 
     bot.send_message(msg.chat.id,
-        f"👑 لوحة الأدمن\n\n"
+        f"📊 الإحصائيات\n\n"
         f"👥 المستخدمين: {users}\n"
+        f"✅ النشطين: {active}\n"
+        f"🚫 المحظورين: {banned}\n\n"
         f"📦 المنتجات: {stock}\n"
-        f"✅ المباعة: {sold}"
+        f"🛒 المباعة: {sold}"
     )
 
-# ========= WEBHOOK =========
-def set_webhook():
-    bot.remove_webhook()
-    time.sleep(2)
-    bot.set_webhook(url=f"{RENDER_URL}/{API_TOKEN}")
+# ========= توليد كروت =========
+@bot.message_handler(func=lambda m: m.text == "🎫 توليد كروت")
+def gen_cards(msg):
+    if msg.chat.id != ADMIN_ID: return
+    bot.send_message(msg.chat.id, "أرسل (عدد:قيمة)\nمثال: 10:5")
+    bot.register_next_step_handler(msg, create_cards)
 
-# ========= RUN =========
-if __name__ == "__main__":
-    set_webhook()
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+def create_cards(msg):
+    try:
+        count, value = map(int, msg.text.split(":"))
+
+        cards = []
+        text = "🎫 الكروت:\n\n"
+
+        for _ in range(count):
+            code = ''.join(__import__('random').choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=12))
+            cards.append({"code": code, "value": value, "used": False})
+            text += f"`{code}`\n"
+
+        cards_col.insert_many(cards)
+        bot.send_message(msg.chat.id, text, parse_mode="Markdown")
+
+    except:
+        bot.send_message(msg.chat.id, "❌ خطأ")
+
+# ========= شحن مباشر =========
+@bot.message_handler(func=lambda m: m.text == "💳 شحن مباشر")
+def direct(msg):
+    if msg.chat.id != ADMIN_ID: return
+    bot.send_message(msg.chat.id, "أرسل (id:المبلغ)")
+    bot.register_next_step_handler(msg, do_direct)
+
+def do_direct(msg):
+    try:
+        uid, amount = msg.text.split(":")
+        uid = int(uid)
+        amount = int(amount)
+
+        users_col.update_one({"_id": uid}, {"$inc": {"balance": amount}})
+        bot.send_message(msg.chat.id, "✅ تم الشحن")
+
+        bot.send_message(uid, f"💰 تم إضافة {amount}")
+
+    except:
+        bot.send_message(msg.chat.id, "❌ خطأ")
+
+# ========= إضافة منتج =========
+@bot.message_handler(func=lambda m: m.text == "➕ إضافة منتج")
+def add_product(msg):
+    if msg.chat.id != ADMIN_ID: return
+
+    bot.send_message(msg.chat.id,
+        "أرسل:\n"
+        "القسم:الفئة:الاسم:السعر\n"
+        "CODE1\nCODE2\nCODE3"
+    )
+    bot.register_next_step_handler(msg, save_product)
+
+def save_product(msg):
+    try:
+        lines = msg.text.split("\n")
+        cat, sub, name, price = lines[0].split(":")
+        price = int(price)
+
+        codes = lines[1:]
+
+        docs = []
+        for c in codes:
+            docs.append({
+                "category": cat,
+                "subcategory": sub,
+                "name": name,
+                "price": price,
+                "code": c,
+                "sold": False
+            })
+
+        stock_col.insert_many(docs)
+        bot.send_message(msg.chat.id, f"✅ تم إضافة {len(codes)} كود")
+
+    except:
+        bot.send_message(msg.chat.id, "❌ خطأ")
+
+# ========= المستخدمين =========
+@bot.message_handler(func=lambda m: m.text == "👥 المستخدمين")
+def users(msg):
+    if msg.chat.id != ADMIN_ID: return
+
+    us = list(users_col.find().limit(20))
+
+    text = "👥 المستخدمين:\n\n"
+    kb = types.InlineKeyboardMarkup()
+
+    for u in us:
+        text += f"{u['_id']} | {u.get('balance',0)}\n"
+        kb.add(types.InlineKeyboardButton(
+            f"إدارة {u['_id']}",
+            callback_data=f"user_{u['_id']}"
+        ))
+
+    bot.send_message(msg.chat.id, text, reply_markup=kb)
+
+# ========= إدارة مستخدم =========
+@bot.callback_query_handler(func=lambda c: c.data.startswith("user_"))
+def manage_user(call):
+    uid = int(call.data.split("_")[1])
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🚫 حظر", callback_data=f"ban_{uid}"))
+    kb.add(types.InlineKeyboardButton("✅ فك الحظر", callback_data=f"unban_{uid}"))
+
+    bot.send_message(call.message.chat.id, f"إدارة {uid}", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ban_"))
+def ban(call):
+    uid = int(call.data.split("_")[1])
+    users_col.update_one({"_id": uid}, {"$set": {"status": "banned"}})
+    bot.send_message(uid, "🚫 تم حظرك")
+    bot.answer_callback_query(call.id, "تم")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("unban_"))
+def unban(call):
+    uid = int(call.data.split("_")[1])
+    users_col.update_one({"_id": uid}, {"$set": {"status": "active"}})
+    bot.send_message(uid, "✅ تم فك الحظر")
+    bot.answer_callback_query(call.id, "تم")
+
+# ========= عرض الأقسام =========
+@bot.message_handler(func=lambda m: m.text == "📦 الأقسام")
+def show_cats(msg):
+    if msg.chat.id != ADMIN_ID: return
+
+    cats = stock_col.distinct("category")
+    text = "📦 الأقسام:\n\n"
+
+    for c in cats:
+        text += f"- {c}\n"
+
+    bot.send_message(msg.chat.id, text)
