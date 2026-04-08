@@ -38,7 +38,7 @@ def menu():
 
 def contact_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    # request_contact=True تجبر تيليجرام على إرسال رقم هاتف الحساب
+    # request_contact=True تجبر تيليجرام على إرسال رقم هاتف الحساب لمنع التلاعب
     kb.add(types.KeyboardButton("إرسال رقم الهاتف 📱", request_contact=True))
     return kb
 
@@ -47,10 +47,10 @@ def check_user_access(uid):
     """دالة للتحقق من أن المستخدم مسجل، أرسل رقمه، وغير مجمد"""
     u = users.find_one({"_id": uid})
     if not u or not u.get("phone"):
-        bot.send_message(uid, "⚠️ يجب عليك مشاركة رقم هاتف حسابك أولاً لتتمكن من استخدام المتجر.", reply_markup=contact_menu())
+        bot.send_message(uid, "⚠️ النظام مغلق. يجب عليك مشاركة رقم هاتف حسابك أولاً من خلال الزر بالأسفل لتتمكن من استخدام المتجر.", reply_markup=contact_menu())
         return None
     if u.get("status") != "active":
-        bot.send_message(uid, "❌ حسابك مجمد. تواصل مع الإدارة.")
+        bot.send_message(uid, "❌ حسابك مجمد قيد المراجعة. برجاء التواصل مع الدعم الفني لتفعيل الحساب.")
         return None
     return u
 
@@ -60,18 +60,19 @@ def start(msg):
     uid = msg.chat.id
     u = users.find_one({"_id": uid})
 
+    # إنشاء الحساب وتجميده افتراضياً لأي مستخدم جديد
     if not u:
         users.insert_one({
             "_id": uid,
             "balance": 0,
-            "status": "active",
+            "status": "frozen", # مجمد افتراضياً حسب طلبك
             "phone": None,
             "join": datetime.datetime.now()
         })
-        u = {"phone": None}
+        u = {"phone": None, "status": "frozen"}
 
     if not u.get("phone"):
-        bot.send_message(uid, "👋 مرحباً بك في المتجر!\n\nلإكمال التسجيل، يرجى الضغط على الزر بالأسفل لمشاركة رقم هاتفك المرتبط بتيليجرام.", reply_markup=contact_menu())
+        bot.send_message(uid, "👋 مرحباً بك في المتجر!\n\nلإكمال عملية التسجيل، يرجى الضغط على الزر بالأسفل لمشاركة رقم هاتفك المرتبط بتيليجرام.", reply_markup=contact_menu())
     else:
         bot.send_message(uid, "👋 مرحباً بك مجدداً في المتجر", reply_markup=menu())
 
@@ -79,27 +80,72 @@ def start(msg):
 def handle_contact(msg):
     uid = msg.chat.id
     
-    # تحقق أمني: التأكد من أن جهة الاتصال المرسلة تخص نفس المستخدم، وليس رقم شخص آخر
+    # تحقق أمني: التأكد من أن جهة الاتصال المرسلة تخص نفس المستخدم
     if msg.contact.user_id != uid:
         return bot.send_message(uid, "❌ الرجاء استخدام الزر بالأسفل لإرسال رقم هاتفك الخاص بحسابك، وليس جهة اتصال أخرى.", reply_markup=contact_menu())
     
     phone = msg.contact.phone_number
-    # إضافة علامة + إذا لم تكن موجودة
+    # إضافة علامة + إذا لم تكن موجودة لتسهيل البحث لاحقاً
     if not phone.startswith('+'):
         phone = '+' + phone
 
     users.update_one({"_id": uid}, {"$set": {"phone": phone}})
-    bot.send_message(uid, f"✅ تم تفعيل حسابك بنجاح!\nرقمك المسجل: {phone}", reply_markup=menu())
+    
+    # إرسال رسالة التجميد والتوجيه للدعم الفني
+    u = users.find_one({"_id": uid})
+    if u.get("status") == "frozen":
+        bot.send_message(uid, f"✅ تم إنشاء حسابك بنجاح وتسجيل الرقم: {phone}\n\n⚠️ حسابك الآن (مجمد). برجاء التواصل مع الدعم الفني لتفعيل الحساب لتتمكن من الشراء والشحن.", reply_markup=menu())
+    else:
+        bot.send_message(uid, f"✅ حسابك نشط وجاهز للاستخدام.", reply_markup=menu())
 
-# ========= ACCOUNT =========
+# ========= ACCOUNT & REPORTS =========
 @bot.message_handler(func=lambda m: m.text == "👤 حسابي")
 def account(msg):
-    u = check_user_access(msg.chat.id)
-    if not u: return
+    u = users.find_one({"_id": msg.chat.id})
+    if not u or not u.get("phone"):
+        return bot.send_message(msg.chat.id, "⚠️ يجب عليك إرسال رقم هاتفك أولاً.", reply_markup=contact_menu())
 
-    status_text = "نشط ✅" if u.get("status") == "active" else "مجمد ❄️"
-    text = f"🆔 ID: `{msg.chat.id}`\n📱 الهاتف: {u.get('phone')}\n💰 رصيدك: {u.get('balance',0)}\nحالة الحساب: {status_text}"
-    bot.send_message(msg.chat.id, text, parse_mode="Markdown")
+    status_text = "نشط ✅" if u.get("status") == "active" else "مجمد ❄️ (تواصل مع الدعم)"
+    text = f"👤 **بيانات حسابك**\n\n🆔 ID: `{msg.chat.id}`\n📱 الهاتف: `{u.get('phone')}`\n💰 رصيدك: **{u.get('balance',0)}**\nحالة الحساب: {status_text}"
+    
+    # أزرار تقارير العميل
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("🛒 سجل المشتريات", callback_data="client_purchases"),
+        types.InlineKeyboardButton("🧾 كشف حساب تفصيلي", callback_data="client_statement")
+    )
+    
+    bot.send_message(msg.chat.id, text, parse_mode="Markdown", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data in ["client_purchases", "client_statement"])
+def client_reports(call):
+    uid = call.message.chat.id
+    u = check_user_access(uid)
+    if not u: return bot.answer_callback_query(call.id, "حسابك مجمد.", show_alert=True)
+
+    if call.data == "client_purchases":
+        history = list(transactions.find({"uid": uid, "type": "شراء"}).sort("_id", -1).limit(10))
+        if not history:
+            return bot.answer_callback_query(call.id, "لا توجد مشتريات سابقة.", show_alert=True)
+            
+        report_text = "🛒 **آخر 10 مشتريات لك:**\n\n"
+        for t in history:
+            report_text += f"▪️ {t['date']} | {t['item_name']} | السعر: {t['price']}\n"
+            
+    elif call.data == "client_statement":
+        history = list(transactions.find({"uid": uid}).sort("_id", -1).limit(20))
+        if not history:
+            return bot.answer_callback_query(call.id, "لا توجد عمليات سابقة.", show_alert=True)
+            
+        report_text = "🧾 **كشف حساب تفصيلي (آخر 20 عملية):**\n\n"
+        for t in history:
+            if t["type"] == "شراء":
+                report_text += f"🔴 خصم | {t['date']} | شراء {t['item_name']} | -{t['price']}\n"
+            else:
+                report_text += f"🟢 إضافة | {t['date']} | {t['type']} | +{t['amount']}\n"
+                
+    bot.send_message(uid, report_text, parse_mode="Markdown")
+    bot.answer_callback_query(call.id)
 
 # ========= CHARGE =========
 @bot.message_handler(func=lambda m: m.text == "💳 شحن")
@@ -132,7 +178,7 @@ def check_card(msg):
         "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     })
     
-    bot.send_message(uid, f"✅ تم شحن {card['value']} بنجاح")
+    bot.send_message(uid, f"✅ تم شحن رصيدك بقيمة {card['value']} بنجاح")
 
 # ========= SHOP =========
 @bot.message_handler(func=lambda m: m.text == "🛒 شراء")
@@ -183,11 +229,9 @@ def buy(call):
     uid = call.message.chat.id
     pid = call.data.split("_")[1]
 
-    user = users.find_one({"_id": uid})
-    if user.get("status") != "active":
-        return bot.answer_callback_query(call.id, "❌ حسابك مجمد.", show_alert=True)
-    if not user.get("phone"):
-        return bot.answer_callback_query(call.id, "❌ يرجى تسجيل رقم هاتفك أولاً.", show_alert=True)
+    user = check_user_access(uid)
+    if not user:
+        return bot.answer_callback_query(call.id, "❌ حسابك مجمد أو يفتقر لرقم الهاتف.", show_alert=True)
 
     item_preview = stock.find_one({"_id": ObjectId(pid), "sold": False})
     if not item_preview:
@@ -215,7 +259,7 @@ def buy(call):
     })
 
     bot.send_message(uid, f"✅ تم الشراء بنجاح!\n\n🎫 الكود الخاص بك:\n`{item['code']}`", parse_mode="Markdown")
-    bot.send_message(ADMIN_ID, f"🛒 شراء جديد\n👤 العميل: {uid}\n📱 الهاتف: {user.get('phone')}\n📦 المنتج: {item['name']}\n💰 السعر: {item['price']}")
+    bot.send_message(ADMIN_ID, f"🛒 عملية شراء جديدة\n👤 العميل: `{uid}`\n📱 الهاتف: {user.get('phone')}\n📦 المنتج: {item['name']}\n💰 السعر: {item['price']}", parse_mode="Markdown")
 
 # ========= ADMIN =========
 @bot.message_handler(commands=['admin'])
@@ -238,7 +282,7 @@ def users_list(msg):
     for u in users.find().sort("join", -1).limit(30):
         stat = "✅" if u.get('status') == 'active' else "❄️"
         phone = u.get('phone', 'بدون رقم')
-        text += f"`{u['_id']}` | 📱 {phone} | الرصيد: {u.get('balance',0)} | {stat}\n"
+        text += f"📱 `{phone}` | الرصيد: {u.get('balance',0)} | {stat}\n"
 
     bot.send_message(msg.chat.id, text, parse_mode="Markdown")
 
@@ -246,35 +290,43 @@ def users_list(msg):
 @bot.message_handler(func=lambda m: m.text == "⚙️ إدارة عميل")
 def manage_customer_cmd(msg):
     if msg.chat.id != ADMIN_ID: return
-    bot.send_message(msg.chat.id, "أرسل ID العميل المراد إدارته:")
+    bot.send_message(msg.chat.id, "أرسل رقم هاتف العميل (أو الـ ID):")
     bot.register_next_step_handler(msg, show_customer_panel)
 
 def show_customer_panel(msg):
     if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     
-    try:
-        uid = int(msg.text.strip())
-        u = users.find_one({"_id": uid})
-        if not u:
-            return bot.send_message(msg.chat.id, "❌ العميل غير موجود.")
+    user_input = msg.text.strip()
+    u = None
+    
+    # البحث بالرقم أو بالآيدي
+    if user_input.startswith('+') or (user_input.isdigit() and len(user_input) >= 9):
+        search_phone = user_input if user_input.startswith('+') else '+' + user_input
+        u = users.find_one({"phone": search_phone})
+    
+    if not u and user_input.isdigit():
+        try:
+            u = users.find_one({"_id": int(user_input)})
+        except: pass
+
+    if not u:
+        return bot.send_message(msg.chat.id, "❌ لم يتم العثور على العميل.")
         
-        phone = u.get("phone", "لم يكمل التسجيل")
-        stat_ar = "نشط" if u.get("status") == "active" else "مجمد"
+    uid = u["_id"]
+    phone = u.get("phone", "لم يكمل التسجيل")
+    stat_ar = "نشط" if u.get("status") == "active" else "مجمد"
+    
+    info = f"👤 بيانات العميل:\nID: `{uid}`\nالهاتف: `{phone}`\nالرصيد: {u.get('balance',0)}\nالحالة: {stat_ar}"
+    
+    kb = types.InlineKeyboardMarkup()
+    if u.get("status") == "active":
+        kb.add(types.InlineKeyboardButton("❄️ تجميد الحساب", callback_data=f"freeze_{uid}"))
+    else:
+        kb.add(types.InlineKeyboardButton("✅ تفعيل الحساب", callback_data=f"activate_{uid}"))
         
-        info = f"👤 بيانات العميل:\nID: `{uid}`\nالهاتف: {phone}\nالرصيد: {u.get('balance',0)}\nالحالة: {stat_ar}"
-        
-        kb = types.InlineKeyboardMarkup()
-        if u.get("status") == "active":
-            kb.add(types.InlineKeyboardButton("❄️ تجميد الحساب", callback_data=f"freeze_{uid}"))
-        else:
-            kb.add(types.InlineKeyboardButton("✅ تفعيل الحساب", callback_data=f"activate_{uid}"))
-            
-        kb.add(types.InlineKeyboardButton("📊 تقرير العمليات", callback_data=f"report_{uid}"))
-        
-        bot.send_message(msg.chat.id, info, reply_markup=kb, parse_mode="Markdown")
-        
-    except ValueError:
-        bot.send_message(msg.chat.id, "❌ ID غير صحيح. يجب أن يكون أرقاماً فقط.")
+    kb.add(types.InlineKeyboardButton("📊 تقرير العمليات للعميل", callback_data=f"report_{uid}"))
+    
+    bot.send_message(msg.chat.id, info, reply_markup=kb, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith(("freeze_", "activate_", "report_")))
 def admin_customer_actions(call):
@@ -291,7 +343,7 @@ def admin_customer_actions(call):
         users.update_one({"_id": uid}, {"$set": {"status": "active"}})
         bot.answer_callback_query(call.id, "✅ تم تفعيل الحساب")
         bot.edit_message_text(call.message.text.replace("مجمد", "نشط"), call.message.chat.id, call.message.message_id)
-        bot.send_message(uid, "✅ تم إعادة تفعيل حسابك، يمكنك الاستمتاع بخدماتنا الآن.")
+        bot.send_message(uid, "✅ تم تفعيل حسابك، يمكنك الاستمتاع بكافة خدمات المتجر الآن.", reply_markup=menu())
         
     elif action == "report":
         history = list(transactions.find({"uid": uid}).sort("_id", -1).limit(15))
@@ -352,38 +404,49 @@ def create_cards(msg):
     except:
         bot.send_message(msg.chat.id, "❌ خطأ في الإدخال.")
 
-# ===== DIRECT CHARGE =====
+# ===== DIRECT CHARGE (VIA PHONE) =====
 @bot.message_handler(func=lambda m: m.text == "💳 شحن يدوي")
 def direct(msg):
     if msg.chat.id != ADMIN_ID: return
-    bot.send_message(msg.chat.id, "أرسل (ID_المستخدم:القيمة)")
+    bot.send_message(msg.chat.id, "أرسل (رقم_الهاتف:القيمة)\nمثال: +218940719000:50")
     bot.register_next_step_handler(msg, do_charge)
 
 def do_charge(msg):
     if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     try:
-        uid, amt = map(int, msg.text.split(":"))
-        result = users.update_one({"_id": uid}, {"$inc": {"balance": amt}})
-        if result.matched_count > 0:
+        phone_str, amt_str = msg.text.split(":")
+        phone = phone_str.strip()
+        amt = int(amt_str.strip())
+        
+        # التأكد من وجود علامة + في بداية الرقم
+        if not phone.startswith('+'):
+            phone = '+' + phone
+            
+        # البحث عن المستخدم برقم الهاتف بدلاً من الـ ID
+        u = users.find_one({"phone": phone})
+        
+        if u:
+            uid = u["_id"]
+            users.update_one({"_id": uid}, {"$inc": {"balance": amt}})
             transactions.insert_one({
                 "uid": uid,
                 "type": "شحن يدوي (إدارة)",
                 "amount": amt,
                 "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
             })
-            bot.send_message(msg.chat.id, "✅ تم الشحن اليدوي بنجاح")
+            bot.send_message(msg.chat.id, f"✅ تم الشحن اليدوي بنجاح للرقم {phone}")
             bot.send_message(uid, f"🎁 تم شحن رصيدك بمبلغ {amt} من قِبل الإدارة")
         else:
-            bot.send_message(msg.chat.id, "❌ العميل غير موجود")
-    except:
-        bot.send_message(msg.chat.id, "❌ خطأ في الإدخال")
+            bot.send_message(msg.chat.id, "❌ لم يتم العثور على عميل مسجل بهذا الرقم.")
+    except Exception as e:
+        bot.send_message(msg.chat.id, "❌ خطأ في الإدخال، تأكد من الصيغة (الرقم:القيمة)")
 
 # ========= DUMMY WEB SERVER FOR RENDER =========
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running perfectly with Mandatory Phone Verification!"
+    return "Bot is running perfectly with strict Phone Validation & Client Reports!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
@@ -391,16 +454,11 @@ def run_web_server():
 
 # ========= RUN =========
 if __name__ == "__main__":
-    # تشغيل السيرفر الوهمي
     threading.Thread(target=run_web_server).start()
-    
-    # حذف الـ Webhook لتجنب التعارض
     bot.remove_webhook()
     
-    # تأخير 5 ثواني للتأكد من انقطاع اتصال أي نسخة قديمة
     print("⏳ Waiting for old instance to shut down...")
     time.sleep(5)
     
-    # تشغيل البوت
     print("🚀 BOT STARTED")
     bot.infinity_polling()
