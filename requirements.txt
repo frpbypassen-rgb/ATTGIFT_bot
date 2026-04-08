@@ -2,3 +2,4 @@ pyTelegramBotAPI
 pymongo
 certifi
 Flask
+requests
