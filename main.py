@@ -5,29 +5,32 @@ from bson import ObjectId
 import datetime
 import certifi
 from flask import Flask, request
+import os
 import time
 
-# ================= CONFIG =================
+# ========= CONFIG =========
 API_TOKEN = '8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc'
 MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT"
 ADMIN_ID = 1262656649
 
+# ✅ رابط Render (مضاف)
+RENDER_URL = "https://attgift-bot.onrender.com"
+
 bot = telebot.TeleBot(API_TOKEN)
 
-# ================= DATABASE =================
+# ========= DATABASE =========
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client['AlAhram_DB']
 
 users_col = db['users']
 stock_col = db['stock']
-orders_col = db['orders']
 
-# ================= FLASK =================
+# ========= FLASK =========
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot is running ✅"
+    return "Bot Running ✅"
 
 @app.route(f"/{API_TOKEN}", methods=["POST"])
 def webhook():
@@ -36,52 +39,33 @@ def webhook():
     bot.process_new_updates([update])
     return "ok", 200
 
-# ================= HELPERS =================
-def main_menu():
+# ========= MENU =========
+def menu():
     m = types.ReplyKeyboardMarkup(resize_keyboard=True)
     m.add("🛒 شراء كود", "👤 حسابي")
     return m
 
-def notify_admin(text):
-    try:
-        bot.send_message(ADMIN_ID, text)
-    except:
-        pass
-
-def create_order(uid, item):
-    orders_col.insert_one({
-        "uid": uid,
-        "item": item['name'],
-        "price": item['price'],
-        "code": item['code'],
-        "date": datetime.datetime.now()
-    })
-
-# ================= START =================
+# ========= START =========
 @bot.message_handler(commands=['start'])
 def start(msg):
     uid = msg.chat.id
-    user = users_col.find_one({"_id": uid})
 
-    if not user:
+    if not users_col.find_one({"_id": uid}):
         users_col.insert_one({
             "_id": uid,
             "balance": 0,
-            "points": 0,
             "join_date": datetime.datetime.now()
         })
 
-    bot.send_message(uid, "أهلاً بك 👋", reply_markup=main_menu())
+    bot.send_message(uid, "أهلاً بك 👋", reply_markup=menu())
 
-# ================= ACCOUNT =================
+# ========= ACCOUNT =========
 @bot.message_handler(func=lambda m: m.text == "👤 حسابي")
 def account(msg):
     u = users_col.find_one({"_id": msg.chat.id})
-    bot.send_message(msg.chat.id,
-        f"💰 رصيدك: {u.get('balance',0)}\n🎯 نقاطك: {u.get('points',0)}"
-    )
+    bot.send_message(msg.chat.id, f"💰 رصيدك: {u.get('balance',0)}")
 
-# ================= SHOP =================
+# ========= SHOP =========
 @bot.message_handler(func=lambda m: m.text == "🛒 شراء كود")
 def shop(msg):
     items = list(stock_col.find({"sold": False}))
@@ -102,7 +86,7 @@ def shop(msg):
             reply_markup=kb
         )
 
-# ================= BUY (SAFE) =================
+# ========= BUY SAFE =========
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
 def buy(call):
     uid = call.message.chat.id
@@ -122,41 +106,23 @@ def buy(call):
         stock_col.update_one({"_id": item['_id']}, {"$set": {"sold": False}})
         return bot.answer_callback_query(call.id, "❌ رصيدك لا يكفي")
 
-    # خصم الرصيد
     users_col.update_one({"_id": uid}, {"$inc": {"balance": -item['price']}})
-
-    # نقاط
-    points = int(item['price'] / 10)
-    users_col.update_one({"_id": uid}, {"$inc": {"points": points}})
-
-    # طلب
-    create_order(uid, item)
-
-    # إشعار أدمن
-    notify_admin(f"🛒 طلب جديد\n👤 {uid}\n📦 {item['name']}\n💰 {item['price']}")
 
     bot.send_message(uid, f"✅ تم الشراء\n🎫 الكود:\n{item['code']}")
     bot.answer_callback_query(call.id, "تم الشراء")
 
-# ================= SMART REPLY =================
-@bot.message_handler(func=lambda m: True)
-def smart(msg):
-    text = msg.text.lower()
-
-    if "مرحبا" in text:
-        bot.reply_to(msg, "أهلاً بك 👋")
-    elif "دعم" in text:
-        bot.reply_to(msg, "📞 تواصل مع الدعم من القائمة")
-
-# ================= WEBHOOK SET =================
+# ========= WEBHOOK =========
 def set_webhook():
     bot.remove_webhook()
     time.sleep(2)
 
-    url = "https://attgift-bot.onrender.com" + API_TOKEN
-    bot.set_webhook(url=url)
+    webhook_url = f"{RENDER_URL}/{API_TOKEN}"
+    print("Webhook:", webhook_url)
 
-# ================= RUN =================
+    bot.set_webhook(url=webhook_url)
+
+# ========= RUN =========
 if __name__ == "__main__":
     set_webhook()
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 10000))  # مهم لـ Render
+    app.run(host="0.0.0.0", port=port)
