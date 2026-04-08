@@ -8,15 +8,15 @@ import os
 from flask import Flask
 from threading import Thread
 
-# --- 1. سيرفر الاستقرار ---
+# --- إعدادات السيرفر للاستقرار على Render ---
 app = Flask('')
 @app.route('/')
-def home(): return "Bot Status: Online"
+def home(): return "Bot is running!"
 
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
-# --- 2. البيانات والربط ---
+# --- إعدادات البوت وقاعدة البيانات ---
 API_TOKEN = '8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc'
 MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT&tlsAllowInvalidCertificates=true"
 ADMIN_ID = 1262656649
@@ -29,132 +29,116 @@ users_col = db['users']
 cards_col = db['topup_cards']
 stock_col = db['stock']
 sales_col = db['sales']
-transfers_col = db['transfers'] # سجل تحويلات المحفظة
 
-# --- 3. القوائم ---
+# --- القوائم الرئيسية ---
 def main_menu():
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    markup.add("🛒 شراء كود", "💳 شحن رصيد", "🏦 شحن مباشر للمحفظة")
+    markup.add("🛒 شراء كود", "💳 شحن رصيد", "🏦 شحن مباشر")
     markup.add("👤 حسابي", "📢 الدعم الفني")
     return markup
 
-# --- 4. أوامر المستخدم ---
+# --- الأوامر الأساسية ---
 @bot.message_handler(commands=['start'])
 def start(message):
     uid = message.chat.id
     user = users_col.find_one({"_id": uid})
     if not user:
         markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
-        markup.add(types.KeyboardButton("📱 تسجيل الحساب برقم الهاتف", request_contact=True))
-        bot.send_message(uid, "🔹 مرحباً بك في شركة الأهرام للاتصالات\nيرجى التسجيل للمتابعة:", reply_markup=markup)
+        markup.add(types.KeyboardButton("📱 مشاركة جهة الاتصال للتسجيل", request_contact=True))
+        bot.send_message(uid, "🔹 مرحباً بك في شركة الأهرام للاتصالات\nيرجى تسجيل حسابك أولاً:", reply_markup=markup)
     else:
-        bot.send_message(uid, f"أهلاً بك مجدداً!\nرصيدك الحالي: {user['balance']} د.ل", reply_markup=main_menu())
+        bot.send_message(uid, f"أهلاً بك مجدداً!\nرصيدك: {user['balance']} د.ل", reply_markup=main_menu())
 
 @bot.message_handler(content_types=['contact'])
 def handle_contact(message):
     if message.contact:
         user_data = {"_id": message.chat.id, "phone": message.contact.phone_number, "balance": 0, "join_date": datetime.datetime.now().strftime("%Y-%m-%d")}
         users_col.update_one({"_id": message.chat.id}, {"$set": user_data}, upsert=True)
-        bot.send_message(message.chat.id, "✅ تم تفعيل حسابك بنجاح!", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "✅ تم التسجيل بنجاح!", reply_markup=main_menu())
+
+@bot.message_handler(func=lambda m: m.text == "📢 الدعم الفني")
+def support(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("💬 مراسلة الدعم (واتساب)", url=f"https://wa.me/{SUPPORT_NUMBER}"))
+    bot.send_message(message.chat.id, "يمكنك التواصل معنا مباشرة عبر الرابط التالي:", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "👤 حسابي")
 def my_account(message):
     user = users_col.find_one({"_id": message.chat.id})
     if user:
-        text = f"👤 **معلومات حسابك:**\n\n📱 الرقم: `{user['phone']}`\n💰 الرصيد: {user['balance']} د.ل\n📅 انضممت في: {user['join_date']}"
+        text = f"👤 **معلومات الحساب:**\n📱 الرقم: `{user['phone']}`\n💰 الرصيد: {user['balance']} د.ل"
         bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda m: m.text == "📢 الدعم الفني")
-def support(message):
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("💬 مراسلة الدعم عبر واتساب", url=f"https://wa.me/{SUPPORT_NUMBER}"))
-    bot.send_message(message.chat.id, "لأي استفسار أو مشكلة في الشحن، تواصل معنا مباشرة:", reply_markup=markup)
+# --- نظام الشحن المباشر ---
+@bot.message_handler(func=lambda m: m.text == "🏦 شحن مباشر")
+def direct_charge_req(message):
+    msg = bot.send_message(message.chat.id, "أرسل (رقم حسابك : المبلغ)\nمثال: 12345 : 50")
+    bot.register_next_step_handler(msg, send_to_admin)
 
-# --- 5. ميزة الشحن المباشر للمحفظة ---
-@bot.message_handler(func=lambda m: m.text == "🏦 شحن مباشر للمحفظة")
-def direct_transfer(message):
-    msg = bot.send_message(message.chat.id, "يرجى إرسال (رقم حسابك : المبلغ المراد شحنه)\nمثال: 12345 : 50")
-    bot.register_next_step_handler(msg, process_transfer_request)
-
-def process_transfer_request(message):
+def send_to_admin(message):
     try:
-        acc, amount = [i.strip() for i in message.text.split(":")]
-        user = users_col.find_one({"_id": message.chat.id})
-        # إرسال طلب للأدمن
+        acc, amount = message.text.split(":")
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("✅ تأكيد الشحن", callback_data=f"confirm_{message.chat.id}_{amount}"))
-        bot.send_message(ADMIN_ID, f"⚠️ **طلب شحن مباشر جديد:**\n\n👤 المستخدم: {user['phone']}\n🏦 رقم الحساب: {acc}\n💰 المبلغ: {amount} د.ل", reply_markup=markup)
-        bot.send_message(message.chat.id, "✅ تم إرسال طلبك للإدارة. سيتم إضافة الرصيد لمحفظتك فور التأكد من التحويل.")
+        markup.add(types.InlineKeyboardButton("✅ تأكيد الإضافة", callback_data=f"confirm_{message.chat.id}_{amount.strip()}"))
+        bot.send_message(ADMIN_ID, f"⚠️ طلب شحن جديد:\nالمستخدم: {message.chat.id}\nالحساب: {acc}\nالمبلغ: {amount} د.ل", reply_markup=markup)
+        bot.send_message(message.chat.id, "✅ تم إرسال طلبك. سيتم شحن محفظتك فور التأكد.")
     except:
-        bot.send_message(message.chat.id, "❌ خطأ في التنسيق. يرجى استخدام (الرقم : المبلغ)")
+        bot.send_message(message.chat.id, "❌ خطأ في التنسيق. استخدم (الحساب : المبلغ)")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_"))
-def admin_confirm_transfer(call):
+def confirm_charge(call):
     _, uid, amt = call.data.split("_")
     users_col.update_one({"_id": int(uid)}, {"$inc": {"balance": int(amt)}})
-    bot.send_message(int(uid), f"✅ تم تأكيد عملية الشحن! تم إضافة {amt} د.ل إلى محفظتك.")
-    bot.edit_message_text(f"✅ تم تنفيذ طلب الشحن للمستخدم بنجاح ({amt} د.ل)", ADMIN_ID, call.message.message_id)
+    bot.send_message(int(uid), f"✅ تم شحن محفظتك بـ {amt} د.ل بنجاح!")
+    bot.edit_message_text(f"✅ تم تأكيد الشحن لـ {uid}", ADMIN_ID, call.message.message_id)
 
-# --- 6. إضافة بضاعة (أكواد متعددة) ---
-@bot.callback_query_handler(func=lambda call: call.data == "add_stock")
-def start_add_stock(call):
-    msg = bot.send_message(ADMIN_ID, "أرسل البيانات بالتنسيق التالي:\n(اسم المنتج : السعر : الكود1, الكود2, الكود3)\n\n*يمكنك وضع مئات الأكواد دفعة واحدة تفصلها فاصلة.*")
-    bot.register_next_step_handler(msg, save_bulk_stock)
+# --- لوحة الإدارة (إضافة بضاعة متعددة) ---
+@bot.message_handler(commands=['admin'])
+def admin_panel(message):
+    if message.chat.id == ADMIN_ID:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("➕ إضافة بضاعة متعددة", callback_data="add_multi"))
+        bot.send_message(ADMIN_ID, "🛠 لوحة الإدارة:", reply_markup=markup)
 
-def save_bulk_stock(message):
+@bot.callback_query_handler(func=lambda call: call.data == "add_multi")
+def prompt_multi(call):
+    msg = bot.send_message(ADMIN_ID, "أرسل البيانات هكذا:\n(الاسم : السعر : كود1, كود2, كود3)")
+    bot.register_next_step_handler(msg, save_multi_stock)
+
+def save_multi_stock(message):
     try:
-        parts = message.text.split(":")
-        name = parts[0].strip()
-        price = int(parts[1].strip())
-        codes = [c.strip() for c in parts[2].replace("\n", ",").split(",")]
-        
-        count = 0
-        for code in codes:
-            if code:
-                stock_col.insert_one({"name": name, "price": price, "secret": code})
-                count += 1
-        bot.send_message(ADMIN_ID, f"✅ تم إضافة {count} كود لمنتج {name} بنجاح!")
-    except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ خطأ في الإضافة: {str(e)}")
+        name, price, codes_raw = message.text.split(":")
+        codes = [c.strip() for c in codes_raw.replace("\n", ",").split(",")]
+        for c in codes:
+            if c: stock_col.insert_one({"name": name.strip(), "price": int(price.strip()), "secret": c})
+        bot.send_message(ADMIN_ID, f"✅ تم إضافة {len(codes)} كود لمنتج {name} بنجاح!")
+    except:
+        bot.send_message(ADMIN_ID, "❌ خطأ في التنسيق.")
 
-# --- 7. بقية الوظائف (توليد كروت، شراء) ---
+# --- نظام الشراء ---
 @bot.message_handler(func=lambda m: m.text == "🛒 شراء كود")
 def shop(message):
     products = stock_col.distinct("name")
-    if not products: return bot.send_message(message.chat.id, "المخزن فارغ.")
+    if not products: return bot.send_message(message.chat.id, "المخزن فارغ حالياً.")
     markup = types.InlineKeyboardMarkup()
     for p in products:
         item = stock_col.find_one({"name": p})
-        markup.add(types.InlineKeyboardButton(f"{p} - {item['price']} د.ل", callback_data=f"buy_{p}"))
+        markup.add(types.InlineKeyboardButton(f"{p} ({item['price']} د.ل)", callback_data=f"buy_{p}"))
     bot.send_message(message.chat.id, "اختر المنتج:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
 def process_buy(call):
     p_name = call.data.split("_")[1]
-    uid = call.message.chat.id
-    user = users_col.find_one({"_id": uid})
+    user = users_col.find_one({"_id": call.message.chat.id})
     item = stock_col.find_one({"name": p_name})
     if item and user['balance'] >= item['price']:
-        users_col.update_one({"_id": uid}, {"$inc": {"balance": -item['price']}})
+        users_col.update_one({"_id": user['_id']}, {"$inc": {"balance": -item['price']}})
         stock_col.delete_one({"_id": item['_id']})
-        bot.send_message(uid, f"✅ تم الشراء!\nكودك: `{item['secret']}`", parse_mode="Markdown")
+        bot.send_message(user['_id'], f"✅ تم الشراء!\nكودك: `{item['secret']}`", parse_mode="Markdown")
     else:
-        bot.answer_callback_query(call.id, "❌ رصيد غير كافٍ", show_alert=True)
+        bot.answer_callback_query(call.id, "❌ رصيد غير كافٍ أو نفذت الكمية", show_alert=True)
 
-@bot.message_handler(commands=['admin'])
-def admin(message):
-    if message.chat.id != ADMIN_ID: return
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("➕ إضافة بضاعة (متعدد)", callback_data="add_stock"))
-    markup.add(types.InlineKeyboardButton("📊 إحصائيات", callback_data="view_stats"))
-    bot.send_message(ADMIN_ID, "🛠 لوحة الإدارة:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data == "view_stats")
-def view_stats(call):
-    count = users_col.count_documents({})
-    bot.send_message(ADMIN_ID, f"📊 عدد المشتركين المسجلين: {count}")
-
-# --- التشغيل ---
+# --- تشغيل البوت ---
 if __name__ == "__main__":
     Thread(target=run_flask).start()
     bot.infinity_polling()
