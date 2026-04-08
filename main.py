@@ -19,6 +19,7 @@ def home():
     return "<h1>Al-Ahram System is Fully Operational</h1>"
 
 def run_flask():
+    # 🌟 المنفذ 10000 متوافق مع منصة Render كما طلبت
     port = int(os.environ.get('PORT', 10000))
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
@@ -163,7 +164,6 @@ def shop_categories(message):
     if not items:
         return bot.send_message(uid, "⚠️ لا توجد منتجات متوفرة حالياً في المخزن.")
     
-    # استخراج الفئات المتاحة (وإعطاء المنتجات القديمة فئة "عام")
     categories = set(item.get('category', 'عام') for item in items)
     
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -177,7 +177,6 @@ def show_category_items(call):
     cat_name = call.data.split("_")[1]
     uid = call.message.chat.id
     
-    # جلب المنتجات التابعة للقسم المختار
     if cat_name == 'عام':
         items = list(stock_col.find({"sold": False, "$or": [{"category": cat_name}, {"category": {"$exists": False}}]}))
     else:
@@ -234,211 +233,4 @@ def finalize_purchase(call):
         users_col.update_one({"_id": uid}, {"$inc": {"balance": -item['price']}})
         logs_col.insert_one({"uid": uid, "type": "buy", "price": item['price'], "date": datetime.datetime.now(), "item": p_name})
         
-        bot.send_message(uid, f"✅ تم شراء **{p_name}** بنجاح!\n🎫 كود المنتج: `{item['code']}`", parse_mode="Markdown")
-        bot.answer_callback_query(call.id, "تم الشراء بنجاح!")
-        bot.delete_message(uid, call.message.message_id)
-
-# --- 7. لوحة التحكم (الأدمن) ---
-@bot.message_handler(commands=['admin'])
-def admin_panel(message):
-    if message.chat.id != ADMIN_ID: return
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("👥 إدارة المشتركين", callback_data="adm_users"),
-        types.InlineKeyboardButton("🔍 بحث برقم الهاتف", callback_data="adm_search_user")
-    )
-    markup.add(
-        types.InlineKeyboardButton("💰 شحن مباشر", callback_data="adm_direct"),
-        types.InlineKeyboardButton("📊 تقارير النظام", callback_data="adm_reports")
-    )
-    markup.add(
-        types.InlineKeyboardButton("🎫 توليد كروت شحن", callback_data="adm_gen"),
-        types.InlineKeyboardButton("➕ إضافة بضاعة متقدمة", callback_data="adm_stock_bulk")
-    )
-    bot.send_message(ADMIN_ID, "🛠 **لوحة تحكم الإدارة:**", reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_"))
-def admin_callbacks(call):
-    if call.message.chat.id != ADMIN_ID: return
-
-    if call.data == "adm_direct":
-        msg = bot.send_message(ADMIN_ID, "📝 أرسل الرقم والقيمة هكذا (الرقم:القيمة)\nمثال: `0913731533:50`", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, admin_direct_recharge)
-    
-    elif call.data == "adm_users":
-        all_u = list(users_col.find().sort("join_date", -1).limit(30))
-        text = "👥 **قائمة المشتركين (آخر 30):**\n\n"
-        markup = types.InlineKeyboardMarkup()
-        for u in all_u:
-            status = "✅" if u.get('status') == 'active' else "❄️"
-            text += f"{status} `{u['phone']}` | {u.get('balance',0)} د.ل\n"
-            markup.add(types.InlineKeyboardButton(f"⚙️ إدارة: {u['phone']}", callback_data=f"opt_{u['_id']}"))
-        bot.send_message(ADMIN_ID, text, reply_markup=markup, parse_mode="Markdown")
-
-    elif call.data == "adm_search_user":
-        msg = bot.send_message(ADMIN_ID, "🔍 أرسل رقم هاتف المشترك للبحث عنه:")
-        bot.register_next_step_handler(msg, admin_search_user_exec)
-
-    elif call.data == "adm_reports":
-        total_users = users_col.count_documents({})
-        active_users = users_col.count_documents({"status": "active"})
-        frozen_users = users_col.count_documents({"status": "frozen"})
-        total_balance = sum(u.get('balance', 0) for u in users_col.find())
-        total_sales = sum(log['price'] for log in logs_col.find({"type": "buy"}))
-        
-        text = (f"📊 **تقارير وإحصائيات النظام:**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"👥 إجمالي المشتركين: **{total_users}**\n"
-                f"✅ الحسابات النشطة: **{active_users}**\n"
-                f"❄️ الحسابات المجمدة: **{frozen_users}**\n\n"
-                f"💰 إجمالي أرصدة المستخدمين: **{total_balance} د.ل**\n"
-                f"🛒 إجمالي المبيعات (الإنفاق): **{total_sales} د.ل**")
-        bot.send_message(ADMIN_ID, text, parse_mode="Markdown")
-
-    elif call.data == "adm_gen":
-        msg = bot.send_message(ADMIN_ID, "🎫 أرسل (عدد الكروت:قيمة الكرت الواحد)\nمثال لتوليد 10 كروت بقيمة 5 دينار: `10:5`", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, admin_generate_cards)
-
-    elif call.data == "adm_stock_bulk":
-        msg_text = ("➕ **إضافة منتجات بأقسام وصور:**\n\n"
-                    "أرسل (القسم:الاسم:السعر:رابط_الصورة) في السطر الأول، ثم أرسل الأكواد في الأسطر التالية.\n\n"
-                    "**أمثلة:**\n"
-                    "اشتراكات:WATCH IT شهر:20:https://example.com/watchit.jpg\n"
-                    "أو\n"
-                    "اشتراكات:Shahid VIP شهر:25:https://example.com/shahid.jpg\n"
-                    "Code-1\n"
-                    "Code-2")
-        msg = bot.send_message(ADMIN_ID, msg_text, parse_mode="Markdown", disable_web_page_preview=True)
-        bot.register_next_step_handler(msg, admin_add_stock_bulk)
-
-def show_user_panel(uid):
-    user = users_col.find_one({"_id": uid})
-    if not user: return
-    
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    if user.get('status') == 'active':
-        markup.add(types.InlineKeyboardButton("❄️ تجميد الحساب", callback_data=f"action_freeze_{uid}"))
-    else:
-        markup.add(types.InlineKeyboardButton("✅ تفعيل الحساب (فك التجميد)", callback_data=f"action_unfreeze_{uid}"))
-        
-    bot.send_message(ADMIN_ID, f"👤 **معلومات وإدارة المشترك:**\n\n📱 الهاتف: `{user['phone']}`\n💰 الرصيد الحالي: {user.get('balance', 0)} د.ل\n📅 تاريخ التسجيل: {user['join_date'].strftime('%Y-%m-%d')}", reply_markup=markup, parse_mode="Markdown")
-
-def admin_search_user_exec(message):
-    phone = message.text.strip()
-    user = users_col.find_one({"phone": phone})
-    if user:
-        show_user_panel(user['_id'])
-    else:
-        bot.send_message(ADMIN_ID, "❌ لم يتم العثور على أي مشترك بهذا الرقم.")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("opt_") or call.data.startswith("action_"))
-def admin_user_management(call):
-    if call.message.chat.id != ADMIN_ID: return
-
-    data_parts = call.data.split("_")
-    
-    if call.data.startswith("opt_"):
-        uid = int(data_parts[1])
-        show_user_panel(uid)
-        bot.answer_callback_query(call.id)
-
-    elif call.data.startswith("action_"):
-        action = data_parts[1]
-        uid = int(data_parts[2])
-        if action == "freeze":
-            users_col.update_one({"_id": uid}, {"$set": {"status": "frozen", "freeze_reason": "تم تجميد حسابك من قبل الإدارة."}})
-            bot.answer_callback_query(call.id, "تم تجميد الحساب بنجاح.", show_alert=True)
-            bot.send_message(uid, "⚠️ تم تجميد حسابك من قبل الإدارة.")
-        elif action == "unfreeze":
-            users_col.update_one({"_id": uid}, {"$set": {"status": "active", "failed_attempts": 0}})
-            bot.answer_callback_query(call.id, "تم فك التجميد بنجاح.", show_alert=True)
-            bot.send_message(uid, "✅ تم تفعيل حسابك مجدداً من قبل الإدارة.")
-        bot.delete_message(ADMIN_ID, call.message.message_id)
-
-def admin_direct_recharge(message):
-    try:
-        phone, amount = message.text.split(":")
-        amount = int(amount.strip())
-        phone = phone.strip()
-        target = users_col.find_one({"phone": phone})
-        if target:
-            users_col.update_one({"_id": target['_id']}, {"$inc": {"balance": amount}})
-            bot.send_message(ADMIN_ID, f"✅ تم شحن {amount} د.ل للرقم {phone} بنجاح.")
-            bot.send_message(target['_id'], f"💰 **تم إضافة {amount} د.ل لرصيدك من قبل الإدارة.**", parse_mode="Markdown")
-        else:
-            bot.send_message(ADMIN_ID, "❌ لم يتم العثور على هذا الرقم في قاعدة البيانات.")
-    except ValueError:
-        bot.send_message(ADMIN_ID, "❌ خطأ في الإدخال! يرجى التأكد من الصيغة (الرقم:القيمة).")
-
-def admin_generate_cards(message):
-    try:
-        count, value = map(int, message.text.split(":"))
-        if count > 50:
-            bot.send_message(ADMIN_ID, "❌ لتجنب الضغط، أقصى عدد لتوليد الكروت في المرة الواحدة هو 50.")
-            return
-
-        cards = []
-        msg_text = f"✅ **تم توليد {count} كرت بقيمة {value} د.ل:**\n\n"
-        for _ in range(count):
-            code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
-            cards.append({"code": code, "val": value, "used": False, "generated_at": datetime.datetime.now()})
-            msg_text += f"`{code}`\n"
-        
-        cards_col.insert_many(cards)
-        bot.send_message(ADMIN_ID, msg_text, parse_mode="Markdown")
-    except ValueError:
-        bot.send_message(ADMIN_ID, "❌ خطأ في الإدخال! يرجى التأكد من إدخال أرقام صحيحة بالصيغة (العدد:القيمة).")
-
-def admin_add_stock_bulk(message):
-    lines = message.text.strip().split('\n')
-    if len(lines) < 2:
-        bot.send_message(ADMIN_ID, "❌ إدخال خاطئ! السطر الأول يجب أن يحتوي على (القسم:الاسم:السعر:رابط الصورة).")
-        return
-    try:
-        parts = lines[0].split(":")
-        
-        # حماية إضافية في حال نسي المدير كتابة الفئة أو رابط الصورة
-        if len(parts) < 3:
-            bot.send_message(ADMIN_ID, "❌ إدخال ناقص! تأكد من التنسيق: القسم:الاسم:السعر:رابط_الصورة")
-            return
-            
-        if len(parts) == 3: # إذا أدخل (الاسم:السعر:رابط) فقط، نضع الفئة "عام"
-            category = "عام"
-            name = parts[0].strip()
-            price = int(parts[1].strip())
-            image_url = ":".join(parts[2:]).strip()
-        else:
-            category = parts[0].strip()
-            name = parts[1].strip()
-            price = int(parts[2].strip())
-            image_url = ":".join(parts[3:]).strip() # إعادة دمج الرابط
-        
-        codes = [line.strip() for line in lines[1:] if line.strip()]
-        
-        if not codes:
-             bot.send_message(ADMIN_ID, "❌ لم يتم العثور على أكواد في الرسالة.")
-             return
-
-        docs = [{"category": category, "name": name, "price": price, "image_url": image_url, "code": c, "sold": False, "added_at": datetime.datetime.now()} for c in codes]
-        stock_col.insert_many(docs)
-        
-        bot.send_message(ADMIN_ID, f"✅ تم إضافة **{len(codes)}** أكواد بنجاح.\n📁 **القسم:** {category}\n📦 **المنتج:** {name}\n💰 **السعر:** {price} د.ل\n🖼️ تم ربط الصورة بنجاح.", parse_mode="Markdown")
-    except ValueError:
-        bot.send_message(ADMIN_ID, "❌ خطأ في السعر! تأكد من كتابة السعر كأرقام فقط.")
-    except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ حدث خطأ غير متوقع: {e}")
-
-# --- 8. تشغيل البوت و Flask ---
-def run_bot():
-    try:
-        bot.remove_webhook()
-        print("⏳ Waiting 5 seconds to clear old instances...")
-        time.sleep(5) 
-        print("🚀 Al-Ahram Bot is Running Successfully with Categories...")
-        bot.infinity_polling(skip_pending=True)
-    except Exception as e:
-        print(f"❌ حدث خطأ أثناء تشغيل البوت: {e}")
-
-if __name__ == "__main__":
-    Thread(target=run_bot).start()
-    run_flask()
+        bot
