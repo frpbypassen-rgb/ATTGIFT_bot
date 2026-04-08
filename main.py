@@ -6,6 +6,9 @@ import datetime
 import certifi
 import random
 import string
+import os
+from flask import Flask
+import threading
 
 # ========= CONFIG =========
 API_TOKEN = "8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc"
@@ -47,8 +50,10 @@ def start(msg):
 @bot.message_handler(func=lambda m: m.text == "👤 حسابي")
 def account(msg):
     u = users.find_one({"_id": msg.chat.id})
-    bot.send_message(msg.chat.id,
-        f"🆔 ID: {msg.chat.id}\n💰 رصيدك: {u.get('balance',0)}")
+    if u:
+        bot.send_message(msg.chat.id, f"🆔 ID: {msg.chat.id}\n💰 رصيدك: {u.get('balance',0)}")
+    else:
+        bot.send_message(msg.chat.id, "❌ حسابك غير موجود، أرسل /start")
 
 # ========= CHARGE =========
 @bot.message_handler(func=lambda m: m.text == "💳 شحن")
@@ -273,6 +278,22 @@ def do_charge(msg):
     except:
         bot.send_message(msg.chat.id, "❌ خطأ في الإدخال")
 
+# ========= DUMMY WEB SERVER FOR RENDER =========
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running perfectly!"
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
 # ========= RUN =========
-print("🚀 BOT STARTED")
-bot.infinity_polling()
+if __name__ == "__main__":
+    # تشغيل سيرفر الويب الوهمي لـ Render في مسار منفصل
+    threading.Thread(target=run_web_server).start()
+    
+    # تشغيل البوت
+    print("🚀 BOT STARTED")
+    bot.infinity_polling()
