@@ -9,6 +9,7 @@ import string
 import os
 from flask import Flask
 import threading
+import time
 
 # ========= CONFIG =========
 API_TOKEN = "8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc"
@@ -390,7 +391,16 @@ def run_web_server():
 
 # ========= RUN =========
 if __name__ == "__main__":
+    # تشغيل السيرفر الوهمي
     threading.Thread(target=run_web_server).start()
+    
+    # حذف الـ Webhook لتجنب التعارض
     bot.remove_webhook()
+    
+    # تأخير 5 ثواني للتأكد من انقطاع اتصال أي نسخة قديمة
+    print("⏳ Waiting for old instance to shut down...")
+    time.sleep(5)
+    
+    # تشغيل البوت
     print("🚀 BOT STARTED")
     bot.infinity_polling()
