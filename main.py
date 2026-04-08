@@ -291,9 +291,12 @@ def run_web_server():
 
 # ========= RUN =========
 if __name__ == "__main__":
-    # تشغيل سيرفر الويب الوهمي لـ Render في مسار منفصل
+    # 1. تشغيل سيرفر الويب الوهمي لـ Render في مسار منفصل
     threading.Thread(target=run_web_server).start()
     
-    # تشغيل البوت
+    # 2. إزالة أي Webhook عالق (حل مشكلة الخطأ 409)
+    bot.remove_webhook()
+    
+    # 3. تشغيل البوت
     print("🚀 BOT STARTED")
     bot.infinity_polling()
