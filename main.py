@@ -18,8 +18,8 @@ def home():
     return "<h1>Al-Ahram System is Fully Operational</h1>"
 
 def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    # إيقاف طباعة سجلات Flask المزعجة في الـ Console
+    # 🌟 التعديل هنا: جعلنا البورت الافتراضي 10000 ليتوافق مع Render
+    port = int(os.environ.get('PORT', 10000))
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
     app.run(host='0.0.0.0', port=port)
@@ -32,7 +32,6 @@ SUPPORT_NUMBER = "+218 91-3731533"
 
 bot = telebot.TeleBot(API_TOKEN)
 
-# الاتصال بـ MongoDB مع شهادة certifi
 try:
     client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
     db = client['AlAhram_DB']
@@ -370,7 +369,7 @@ def run_bot():
         print(f"❌ حدث خطأ أثناء تشغيل البوت: {e}")
 
 if __name__ == "__main__":
-    # 1. تشغيل البوت في خيط (Thread) منفصل في الخلفية
+    # 1. تشغيل البوت في خيط (Thread) منفصل
     Thread(target=run_bot).start()
     
     # 2. تشغيل سيرفر Flask في المسار الرئيسي لكي يكتشفه Render بنجاح
