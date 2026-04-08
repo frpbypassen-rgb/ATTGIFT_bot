@@ -10,14 +10,14 @@ import os
 from flask import Flask
 import threading
 import time
-import requests # لإرسال البيانات لجوجل شيت
+import requests 
 
 # ========= CONFIG =========
 API_TOKEN = "8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc"
 ADMIN_ID = 1262656649
 MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT"
 
-# رابط جوجل شيت لتسجيل الفواتير والأرباح الذي قمت بإنشائه
+# رابط جوجل شيت لتسجيل الفواتير والأرباح
 SHEET_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbzPrw8oANq8Aek6O6URoTU0kDVjb1ZtoVdYkhpqAqM6Nuws4ZmcPRC9JtoNZvWoMzUb/exec"
 
 bot = telebot.TeleBot(API_TOKEN)
@@ -28,9 +28,9 @@ users = db["users"]
 stock = db["stock"]
 cards = db["cards"]
 transactions = db["transactions"]
-counters = db["counters"] # لحفظ تسلسل الفواتير
+counters = db["counters"]
 
-MENU_BUTTONS = ["🛒 شراء", "💳 شحن", "👤 حسابي", "👥 المستخدمين", "🎫 توليد", "➕ منتج", "💳 شحن يدوي", "⚙️ إدارة عميل", "💰 ضبط الرصيد", "🏪 العودة للمتجر"]
+MENU_BUTTONS = ["🛒 شراء", "💳 شحن", "👤 حسابي", "👥 المستخدمين", "🎫 توليد", "➕ منتج", "💳 شحن يدوي", "⚙️ إدارة عميل", "💰 ضبط الرصيد", "🧾 سجل الفواتير", "🏪 العودة للمتجر"]
 
 # ========= MENUS =========
 def menu():
@@ -49,7 +49,7 @@ def admin_menu():
     kb.add("👥 المستخدمين", "⚙️ إدارة عميل")
     kb.add("🎫 توليد", "💳 شحن يدوي")
     kb.add("💰 ضبط الرصيد", "➕ منتج")
-    kb.add("🏪 العودة للمتجر") # زر العودة للمتجر
+    kb.add("🧾 سجل الفواتير", "🏪 العودة للمتجر") 
     return kb
 
 # ========= HELPER FUNCTIONS =========
@@ -64,13 +64,10 @@ def check_user_access(uid):
     return u
 
 def find_customer(text):
-    """دالة بحث ذكية جداً برقم الهاتف أو الـ ID"""
     text = text.strip()
-    # 1. البحث بالـ ID المباشر
     if text.isdigit():
         u = users.find_one({"_id": int(text)})
         if u: return u
-    # 2. البحث برقم الهاتف (تنظيف الرقم من الفراغات والبلس والأصفار)
     clean_phone = text.replace("+", "").replace(" ", "").lstrip("0")
     if clean_phone:
         u = users.find_one({"phone": {"$regex": f"{clean_phone}$"}}) 
@@ -78,7 +75,6 @@ def find_customer(text):
     return None
 
 def get_next_order_id():
-    """الحصول على رقم فاتورة متسلسل"""
     doc = counters.find_one_and_update(
         {"_id": "order_id"},
         {"$inc": {"seq": 1}},
@@ -95,7 +91,7 @@ def start(msg):
 
     if not u:
         users.insert_one({
-            "_id": uid, "balance": 0, "status": "frozen", "phone": None, "join": datetime.datetime.now()
+            "_id": uid, "balance": 0, "status": "frozen", "phone": None, "failed_attempts": 0, "join": datetime.datetime.now()
         })
         u = {"phone": None, "status": "frozen"}
 
@@ -163,7 +159,7 @@ def client_reports(call):
     bot.send_message(uid, report_text, parse_mode="Markdown")
     bot.answer_callback_query(call.id)
 
-# ========= CHARGE =========
+# ========= CHARGE (WITH ANTI-SPAM) =========
 @bot.message_handler(func=lambda m: m.text == "💳 شحن")
 def charge(msg):
     if not check_user_access(msg.chat.id): return
@@ -172,12 +168,26 @@ def charge(msg):
 
 def check_card(msg):
     if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
-    code = msg.text.strip()
     uid = msg.chat.id
-    card = cards.find_one_and_update({"code": code, "used": False}, {"$set": {"used": True}})
-    if not card: return bot.send_message(uid, "❌ كود غير صالح")
+    u = users.find_one({"_id": uid})
+    
+    if not u or u.get("status") != "active":
+        return bot.send_message(uid, "❌ حسابك مجمد. لا يمكنك الشحن.")
 
-    users.update_one({"_id": uid}, {"$inc": {"balance": card["value"]}})
+    code = msg.text.strip()
+    card = cards.find_one_and_update({"code": code, "used": False}, {"$set": {"used": True}})
+    
+    if not card:
+        failed_attempts = u.get("failed_attempts", 0) + 1
+        if failed_attempts >= 5:
+            users.update_one({"_id": uid}, {"$set": {"status": "frozen", "failed_attempts": 0}})
+            return bot.send_message(uid, "🚫 تم إيقاف الحساب بسبب التلاعب بالنظام.")
+        else:
+            users.update_one({"_id": uid}, {"$set": {"failed_attempts": failed_attempts}})
+            attempts_left = 5 - failed_attempts
+            return bot.send_message(uid, f"❌ كود غير صالح. (متبقي لك {attempts_left} محاولات قبل تجميد الحساب)")
+
+    users.update_one({"_id": uid}, {"$inc": {"balance": card["value"]}, "$set": {"failed_attempts": 0}})
     transactions.insert_one({"uid": uid, "type": "شحن كارت", "amount": card["value"], "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")})
     bot.send_message(uid, f"✅ تم شحن رصيدك بقيمة {card['value']} بنجاح")
 
@@ -227,18 +237,16 @@ def buy(call):
 
     users.update_one({"_id": uid}, {"$inc": {"balance": -item["price"]}})
 
-    # حسابات الفاتورة والربح
     order_id = get_next_order_id()
     cost_price = item.get("cost", 0)
     profit = item["price"] - cost_price
     dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     transactions.insert_one({
-        "order_id": order_id, "uid": uid, "type": "شراء", "item_name": item['name'],
+        "order_id": order_id, "uid": uid, "phone": user.get('phone'), "type": "شراء", "item_name": item['name'],
         "price": item["price"], "cost": cost_price, "profit": profit, "date": dt_now
     })
 
-    # الإرسال لجوجل شيت
     if SHEET_WEBHOOK_URL and SHEET_WEBHOOK_URL.startswith("http"):
         try:
             requests.post(SHEET_WEBHOOK_URL, json={
@@ -261,6 +269,19 @@ def admin(msg):
 def back_to_store(msg):
     if msg.chat.id != ADMIN_ID: return
     bot.send_message(msg.chat.id, "🔄 تم تحويلك لوضع العميل", reply_markup=menu())
+
+# ===== INVOICE LOG =====
+@bot.message_handler(func=lambda m: m.text == "🧾 سجل الفواتير")
+def invoices_log(msg):
+    if msg.chat.id != ADMIN_ID: return
+    history = list(transactions.find({"type": "شراء", "order_id": {"$exists": True}}).sort("_id", -1).limit(40))
+    if not history: return bot.send_message(msg.chat.id, "لا توجد فواتير مبيعات حتى الآن.")
+    
+    text = "🧾 **سجل آخر 40 فاتورة:**\n\n"
+    for t in history:
+        text += f"▪️ #{t['order_id']} | 📱 `{t.get('phone', 'بدون')}` | 🛒 {t['item_name']} | 💰 {t['price']}\n"
+        
+    bot.send_message(msg.chat.id, text, parse_mode="Markdown")
 
 # ===== USERS =====
 @bot.message_handler(func=lambda m: m.text == "👥 المستخدمين")
@@ -304,7 +325,8 @@ def admin_customer_actions(call):
         bot.edit_message_text(call.message.text.replace("نشط", "مجمد"), call.message.chat.id, call.message.message_id)
         bot.send_message(uid, "⚠️ تم تجميد حسابك.")
     elif action == "activate":
-        users.update_one({"_id": uid}, {"$set": {"status": "active"}})
+        # تفعيل الحساب وتصفير عداد المحاولات الخاطئة
+        users.update_one({"_id": uid}, {"$set": {"status": "active", "failed_attempts": 0}})
         bot.answer_callback_query(call.id, "✅ تم التفعيل")
         bot.edit_message_text(call.message.text.replace("مجمد", "نشط"), call.message.chat.id, call.message.message_id)
         bot.send_message(uid, "✅ تم تفعيل حسابك، يمكنك الاستمتاع بالمتجر.", reply_markup=menu())
@@ -317,7 +339,7 @@ def admin_customer_actions(call):
             else: report_text += f"▪️ {t['date']} | 💳 {t['type']} | بـ {t['amount']}\n"
         bot.send_message(call.message.chat.id, report_text, parse_mode="Markdown")
 
-# ===== ADD PRODUCT (WITH COST) =====
+# ===== ADD PRODUCT =====
 @bot.message_handler(func=lambda m: m.text == "➕ منتج")
 def add_product(msg):
     if msg.chat.id != ADMIN_ID: return
@@ -367,7 +389,7 @@ def do_set_balance(msg):
     except:
         bot.send_message(msg.chat.id, "❌ خطأ في الإدخال.")
 
-# ===== DIRECT CHARGE (ADD BALANCE) =====
+# ===== DIRECT CHARGE =====
 @bot.message_handler(func=lambda m: m.text == "💳 شحن يدوي")
 def direct(msg):
     if msg.chat.id != ADMIN_ID: return
