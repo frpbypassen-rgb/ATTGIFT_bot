@@ -3,3 +3,4 @@ pymongo
 certifi
 Flask
 requests
+openpyxl
