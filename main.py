@@ -35,7 +35,7 @@ counters = db["counters"]
 MENU_BUTTONS = [
     "🛒 شراء", "💳 شحن", "👤 حسابي", "👥 المستخدمين", 
     "🎫 توليد", "➕ منتج", "💳 شحن يدوي", "⚙️ إدارة عميل", 
-    "💰 ضبط الرصيد", "🧾 سجل الفواتير", "🏪 العودة للمتجر"
+    "💰 ضبط الرصيد", "🧾 سجل الفواتير", "📦 إدارة المخزون", "🏪 العودة للمتجر"
 ]
 
 temp_admin_data = {}
@@ -57,7 +57,8 @@ def admin_menu():
     kb.add("👥 المستخدمين", "⚙️ إدارة عميل")
     kb.add("🎫 توليد", "💳 شحن يدوي")
     kb.add("💰 ضبط الرصيد", "➕ منتج")
-    kb.add("🧾 سجل الفواتير", "🏪 العودة للمتجر") 
+    kb.add("📦 إدارة المخزون", "🧾 سجل الفواتير") 
+    kb.add("🏪 العودة للمتجر") 
     return kb
 
 # ========= HELPER FUNCTIONS =========
@@ -67,7 +68,7 @@ def check_user_access(uid):
         bot.send_message(uid, "⚠️ النظام مغلق. يجب عليك مشاركة رقم هاتف حسابك أولاً.", reply_markup=contact_menu())
         return None
     if u.get("status") != "active":
-        bot.send_message(uid, "❌ حسابك مجمد قيد المراجعة. برجاء التواصل مع الدعم الفني.")
+        bot.send_message(uid, "❌ حساب مجمد. برجاء التواصل مع الدعم الفني.")
         return None
     return u
 
@@ -92,14 +93,10 @@ def get_next_order_id():
     return doc["seq"]
 
 def generate_excel_file(items_data, index):
-    """دالة لإنشاء ملف إكسيل يحتوي على الأكواد والأرقام التسلسلية"""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Codes"
-    # إضافة العناوين
     ws.append(["الكود", "الرقم التسلسلي"])
-    
-    # إضافة البيانات
     for data in items_data:
         ws.append([data['code'], data['serial']])
     
@@ -327,15 +324,22 @@ def process_purchase(msg, user, item_ref, available):
 
     bot.send_message(uid, f"✅ تم الشراء بنجاح!\n🧾 رقم الفاتورة: #{order_id}\n💰 إجمالي المخصوم: {total_price}\n\nجاري تجهيز الأكواد وإرسالها في ملفات إكسيل...", parse_mode="Markdown")
 
-    # تقسيم الأكواد والسيريالات إلى ملفات إكسيل (10 أكواد في كل ملف)
+    # إشعار الإدارة بعملية الشراء
+    bot.send_message(ADMIN_ID, f"🛒 شراء بالجملة | فاتورة #{order_id}\n👤 العميل: `{uid}`\n📱 الهاتف: {user_fresh.get('phone')}\n📦 المنتج: {name} (الكمية: {qty})\n💰 المدفوع: {total_price}\n💵 المربح: {profit}", parse_mode="Markdown")
+
     purchased_items_data = [{'code': d['code'], 'serial': d.get('serial', 'بدون_تسلسلي')} for d in available_docs]
     chunks = [purchased_items_data[i:i + 10] for i in range(0, len(purchased_items_data), 10)]
     
     for i, chunk in enumerate(chunks):
+        # إنشاء الملف
         file_stream = generate_excel_file(chunk, i)
+        
+        # إرسال الملف للعميل
         bot.send_document(uid, document=file_stream, caption=f"📁 الأكواد (الدفعة {i+1} من {len(chunks)})")
-
-    bot.send_message(ADMIN_ID, f"🛒 شراء بالجملة | فاتورة #{order_id}\n👤 العميل: `{uid}`\n📱 الهاتف: {user_fresh.get('phone')}\n📦 المنتج: {name} (الكمية: {qty})\n💰 المدفوع: {total_price}\n💵 المربح: {profit}", parse_mode="Markdown")
+        
+        # إعادة المؤشر للبداية لإرسال نفس الملف للإدارة
+        file_stream.seek(0)
+        bot.send_document(ADMIN_ID, document=file_stream, caption=f"📁 نسخة للإدارة | فاتورة #{order_id} | الدفعة {i+1}")
 
 # ========= ADMIN =========
 @bot.message_handler(commands=['admin'])
@@ -347,6 +351,97 @@ def admin(msg):
 def back_to_store(msg):
     if msg.chat.id != ADMIN_ID: return
     bot.send_message(msg.chat.id, "🔄 تم تحويلك لوضع العميل", reply_markup=menu())
+
+# ===== MANAGE STOCK =====
+@bot.message_handler(func=lambda m: m.text == "📦 إدارة المخزون")
+def manage_stock_cmd(msg):
+    if msg.chat.id != ADMIN_ID: return
+    
+    names = stock.distinct("name", {"sold": False})
+    if not names: 
+        return bot.send_message(msg.chat.id, "❌ المخزن فارغ حالياً أو تم بيع كل المنتجات.")
+    
+    text = "📦 **المنتجات المتوفرة في المخزن:**\n\n"
+    for n in names:
+        count = stock.count_documents({"name": n, "sold": False})
+        text += f"▪️ `{n}` (الكمية: {count})\n"
+        
+    text += "\n👉 أرسل **اسم المنتج** (انسخه من القائمة بالأعلى) لإدارته:"
+    bot.send_message(msg.chat.id, text, parse_mode="Markdown")
+    bot.register_next_step_handler(msg, show_stock_item_panel)
+
+def show_stock_item_panel(msg):
+    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
+    name = msg.text.strip()
+    
+    count = stock.count_documents({"name": name, "sold": False})
+    item = stock.find_one({"name": name, "sold": False})
+    
+    if not item:
+        return bot.send_message(msg.chat.id, "❌ المنتج غير موجود أو نفذت كميته. تأكد من نسخ الاسم بشكل صحيح.")
+        
+    text = f"📦 المنتج: `{name}`\n💰 السعر الحالي: {item['price']}\n📉 التكلفة: {item.get('cost', 0)}\n📊 الكمية المتوفرة: {count}"
+    
+    if msg.chat.id not in temp_admin_data: temp_admin_data[msg.chat.id] = {}
+    temp_admin_data[msg.chat.id]["mng_item_name"] = name
+    
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("💰 تعديل السعر", callback_data="stk_price"))
+    kb.add(types.InlineKeyboardButton("➖ حذف كمية من الأكواد", callback_data="stk_delqty"))
+    kb.add(types.InlineKeyboardButton("❌ حذف المنتج بالكامل", callback_data="stk_delall"))
+    
+    bot.send_message(msg.chat.id, text, reply_markup=kb, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("stk_"))
+def stk_action(call):
+    action = call.data.split("_")[1]
+    data = temp_admin_data.get(call.message.chat.id)
+    
+    if not data or "mng_item_name" not in data:
+        return bot.answer_callback_query(call.id, "❌ انتهت الجلسة، الرجاء إعادة طلب المخزون.", show_alert=True)
+        
+    name = data["mng_item_name"]
+    
+    if action == "price":
+        msg = bot.send_message(call.message.chat.id, f"أرسل السعر الجديد للمنتج `{name}`:", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, update_stock_price, name)
+        bot.answer_callback_query(call.id)
+        
+    elif action == "delqty":
+        msg = bot.send_message(call.message.chat.id, f"أرسل عدد الأكواد المراد حذفها من المنتج `{name}`:", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, delete_stock_qty, name)
+        bot.answer_callback_query(call.id)
+        
+    elif action == "delall":
+        res = stock.delete_many({"name": name, "sold": False})
+        bot.answer_callback_query(call.id, f"✅ تم حذف {res.deleted_count} كود.")
+        bot.edit_message_text(f"✅ تم حذف المنتج `{name}` بالكامل ({res.deleted_count} كود) من المخزن.", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+        if call.message.chat.id in temp_admin_data and "mng_item_name" in temp_admin_data[call.message.chat.id]:
+            del temp_admin_data[call.message.chat.id]["mng_item_name"]
+
+def update_stock_price(msg, name):
+    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
+    try:
+        new_price = float(msg.text.strip())
+        res = stock.update_many({"name": name, "sold": False}, {"$set": {"price": new_price}})
+        bot.send_message(msg.chat.id, f"✅ تم تحديث سعر `{name}` ليصبح {new_price} لـ {res.modified_count} كود.", parse_mode="Markdown")
+    except:
+        bot.send_message(msg.chat.id, "❌ خطأ، يرجى إرسال أرقام فقط.")
+
+def delete_stock_qty(msg, name):
+    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
+    try:
+        qty_to_delete = int(msg.text.strip())
+        docs_to_delete = list(stock.find({"name": name, "sold": False}).limit(qty_to_delete))
+        
+        if not docs_to_delete:
+            return bot.send_message(msg.chat.id, "❌ لا توجد أكواد متاحة للحذف.")
+        
+        doc_ids = [d['_id'] for d in docs_to_delete]
+        res = stock.delete_many({"_id": {"$in": doc_ids}})
+        bot.send_message(msg.chat.id, f"✅ تم حذف {res.deleted_count} كود من منتج `{name}` بنجاح.", parse_mode="Markdown")
+    except:
+        bot.send_message(msg.chat.id, "❌ خطأ، يرجى إرسال رقم صحيح.")
 
 # ===== INVOICE LOG =====
 @bot.message_handler(func=lambda m: m.text == "🧾 سجل الفواتير")
@@ -430,7 +525,8 @@ def save_product_info(msg):
     if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     try:
         cat, sub, name, price, cost = msg.text.split(":")
-        temp_admin_data[msg.chat.id] = {
+        if msg.chat.id not in temp_admin_data: temp_admin_data[msg.chat.id] = {}
+        temp_admin_data[msg.chat.id]["new_product"] = {
             "cat": cat.strip(), "sub": sub.strip(), "name": name.strip(),
             "price": float(price.strip()), "cost": float(cost.strip())
         }
@@ -446,7 +542,7 @@ def save_product_info(msg):
 def process_product_codes(msg):
     if msg.text and msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     
-    data = temp_admin_data.get(msg.chat.id)
+    data = temp_admin_data.get(msg.chat.id, {}).get("new_product")
     if not data: return bot.send_message(msg.chat.id, "❌ حدث خطأ، يرجى إعادة المحاولة من زر (➕ منتج).")
 
     codes = []
@@ -466,7 +562,6 @@ def process_product_codes(msg):
             for row in ws.iter_rows(values_only=True):
                 if row and row[0]: # إذا كان العمود A غير فارغ
                     code_val = str(row[0]).strip()
-                    # استخراج التسلسلي من العمود B إن وجد
                     serial_val = str(row[1]).strip() if len(row) > 1 and row[1] else "بدون_تسلسلي"
                     codes.append({"code": code_val, "serial": serial_val})
         except Exception as e:
@@ -493,7 +588,8 @@ def process_product_codes(msg):
         
     stock.insert_many(docs)
     bot.send_message(msg.chat.id, f"✅ تم إضافة {len(docs)} كود (مع الأرقام التسلسلية) بنجاح للمنتج [{data['name']}].\nالسعر: {data['price']} | التكلفة: {data['cost']}")
-    del temp_admin_data[msg.chat.id]
+    if msg.chat.id in temp_admin_data and "new_product" in temp_admin_data[msg.chat.id]:
+        del temp_admin_data[msg.chat.id]["new_product"]
 
 # ===== SET BALANCE =====
 @bot.message_handler(func=lambda m: m.text == "💰 ضبط الرصيد")
@@ -574,7 +670,7 @@ def create_cards(msg):
 # ========= DUMMY WEB SERVER FOR RENDER =========
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot is running with Excel Integration & Float Values!"
+def home(): return "Bot is running perfectly!"
 def run_web_server(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
 # ========= RUN =========
@@ -583,5 +679,5 @@ if __name__ == "__main__":
     bot.remove_webhook()
     print("⏳ Waiting for old instance to shut down...")
     time.sleep(5)
-    print("🚀 EXCEL BOT STARTED")
+    print("🚀 FULL ADMIN BOT STARTED")
     bot.infinity_polling()
