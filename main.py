@@ -11,6 +11,8 @@ from flask import Flask
 import threading
 import time
 import requests 
+import io
+import openpyxl # مكتبة الإكسيل الجديدة
 
 # ========= CONFIG =========
 API_TOKEN = "8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc"
@@ -35,6 +37,9 @@ MENU_BUTTONS = [
     "🎫 توليد", "➕ منتج", "💳 شحن يدوي", "⚙️ إدارة عميل", 
     "💰 ضبط الرصيد", "🧾 سجل الفواتير", "🏪 العودة للمتجر"
 ]
+
+# متغير مؤقت لحفظ بيانات المنتج قبل رفع ملف الإكسيل من الأدمن
+temp_admin_data = {}
 
 # ========= MENUS =========
 def menu():
@@ -87,6 +92,21 @@ def get_next_order_id():
     )
     return doc["seq"]
 
+def generate_excel_file(codes, index):
+    """دالة لإنشاء ملف إكسيل في الذاكرة للأكواد"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Codes"
+    ws.append(["الكود"]) # عنوان العمود
+    for c in codes:
+        ws.append([c])
+    
+    file_stream = io.BytesIO()
+    wb.save(file_stream)
+    file_stream.seek(0)
+    file_stream.name = f"Codes_Part_{index+1}.xlsx"
+    return file_stream
+
 # ========= START & CONTACT HANDLER =========
 @bot.message_handler(commands=['start'])
 def start(msg):
@@ -95,12 +115,7 @@ def start(msg):
 
     if not u:
         users.insert_one({
-            "_id": uid, 
-            "balance": 0, 
-            "status": "frozen", 
-            "phone": None, 
-            "failed_attempts": 0, 
-            "join": datetime.datetime.now()
+            "_id": uid, "balance": 0, "status": "frozen", "phone": None, "failed_attempts": 0, "join": datetime.datetime.now()
         })
         u = {"phone": None, "status": "frozen"}
 
@@ -116,8 +131,7 @@ def handle_contact(msg):
         return bot.send_message(uid, "❌ الرجاء إرسال رقم هاتفك الخاص.", reply_markup=contact_menu())
     
     phone = msg.contact.phone_number
-    if not phone.startswith('+'): 
-        phone = '+' + phone
+    if not phone.startswith('+'): phone = '+' + phone
 
     users.update_one({"_id": uid}, {"$set": {"phone": phone}})
     u = users.find_one({"_id": uid})
@@ -130,8 +144,7 @@ def handle_contact(msg):
 @bot.message_handler(func=lambda m: m.text == "👤 حسابي")
 def account(msg):
     u = users.find_one({"_id": msg.chat.id})
-    if not u or not u.get("phone"): 
-        return bot.send_message(msg.chat.id, "⚠️ أرسل رقم هاتفك أولاً.", reply_markup=contact_menu())
+    if not u or not u.get("phone"): return bot.send_message(msg.chat.id, "⚠️ أرسل رقم هاتفك أولاً.", reply_markup=contact_menu())
 
     status_text = "نشط ✅" if u.get("status") == "active" else "مجمد ❄️"
     text = f"👤 **بيانات حسابك**\n\n🆔 ID: `{msg.chat.id}`\n📱 الهاتف: `{u.get('phone')}`\n💰 رصيدك: **{u.get('balance',0)}**\nحالة الحساب: {status_text}"
@@ -147,13 +160,11 @@ def account(msg):
 def client_reports(call):
     uid = call.message.chat.id
     u = check_user_access(uid)
-    if not u: 
-        return bot.answer_callback_query(call.id, "حسابك مجمد.", show_alert=True)
+    if not u: return bot.answer_callback_query(call.id, "حسابك مجمد.", show_alert=True)
 
     if call.data == "client_purchases":
         history = list(transactions.find({"uid": uid, "type": "شراء"}).sort("_id", -1).limit(10))
-        if not history: 
-            return bot.answer_callback_query(call.id, "لا توجد مشتريات.", show_alert=True)
+        if not history: return bot.answer_callback_query(call.id, "لا توجد مشتريات.", show_alert=True)
         report_text = "🛒 **آخر 10 مشتريات:**\n\n"
         for t in history:
             order_id = t.get('order_id', 'N/A')
@@ -161,8 +172,7 @@ def client_reports(call):
             
     elif call.data == "client_statement":
         history = list(transactions.find({"uid": uid}).sort("_id", -1).limit(20))
-        if not history: 
-            return bot.answer_callback_query(call.id, "لا توجد عمليات.", show_alert=True)
+        if not history: return bot.answer_callback_query(call.id, "لا توجد عمليات.", show_alert=True)
         report_text = "🧾 **كشف حساب (آخر 20):**\n\n"
         for t in history:
             if t["type"] == "شراء":
@@ -181,8 +191,7 @@ def charge(msg):
     bot.register_next_step_handler(msg, check_card)
 
 def check_card(msg):
-    if msg.text in MENU_BUTTONS: 
-        return bot.send_message(msg.chat.id, "تم الإلغاء.")
+    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     uid = msg.chat.id
     u = users.find_one({"_id": uid})
     
@@ -203,14 +212,7 @@ def check_card(msg):
             return bot.send_message(uid, f"❌ كود غير صالح. (متبقي لك {attempts_left} محاولات قبل تجميد الحساب)")
 
     users.update_one({"_id": uid}, {"$inc": {"balance": card["value"]}, "$set": {"failed_attempts": 0}})
-    
-    transactions.insert_one({
-        "uid": uid, 
-        "type": "شحن كارت", 
-        "amount": card["value"], 
-        "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    })
-    
+    transactions.insert_one({"uid": uid, "type": "شحن كارت", "amount": card["value"], "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")})
     bot.send_message(uid, f"✅ تم شحن رصيدك بقيمة {card['value']} بنجاح")
 
 # ========= SHOP =========
@@ -218,11 +220,9 @@ def check_card(msg):
 def shop(msg):
     if not check_user_access(msg.chat.id): return
     cats = stock.distinct("category")
-    if not cats: 
-        return bot.send_message(msg.chat.id, "❌ لا توجد منتجات حالياً")
+    if not cats: return bot.send_message(msg.chat.id, "❌ لا توجد منتجات حالياً")
     kb = types.InlineKeyboardMarkup()
-    for c in cats: 
-        kb.add(types.InlineKeyboardButton(c, callback_data=f"cat_{c}"))
+    for c in cats: kb.add(types.InlineKeyboardButton(c, callback_data=f"cat_{c}"))
     bot.send_message(msg.chat.id, "اختر قسم:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cat_"))
@@ -230,71 +230,113 @@ def cat(call):
     cat_name = call.data.split("_",1)[1]
     subs = stock.distinct("subcategory", {"category": cat_name})
     kb = types.InlineKeyboardMarkup()
-    for s in subs: 
-        kb.add(types.InlineKeyboardButton(s, callback_data=f"sub_{cat_name}_{s}"))
+    for s in subs: kb.add(types.InlineKeyboardButton(s, callback_data=f"sub_{cat_name}_{s}"))
     bot.edit_message_text("اختر فئة:", call.message.chat.id, call.message.message_id, reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sub_"))
 def sub(call):
     _, cat_name, sub_name = call.data.split("_",2)
     items = list(stock.find({"category": cat_name, "subcategory": sub_name, "sold": False}))
-    if not items: 
-        return bot.answer_callback_query(call.id, "❌ نفذت الكمية")
+    if not items: return bot.answer_callback_query(call.id, "❌ نفذت الكمية")
     item = items[0]
+    available_count = len(items)
+    
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("شراء", callback_data=f"buy_{item['_id']}"))
-    bot.send_message(call.message.chat.id, f"📦 المنتج: {item['name']}\n💰 السعر: {item['price']}\n📊 الكمية: {len(items)}", reply_markup=kb)
+    kb.add(types.InlineKeyboardButton("🛒 طلب شراء", callback_data=f"buy_{item['_id']}"))
+    bot.send_message(call.message.chat.id, f"📦 المنتج: {item['name']}\n💰 السعر: {item['price']}\n📊 المتوفر: {available_count}", reply_markup=kb)
 
-# ========= BUY =========
+# ========= BUY (BULK WITH EXCEL) =========
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
-def buy(call):
+def buy_quantity_prompt(call):
     uid = call.message.chat.id
     pid = call.data.split("_")[1]
 
     user = check_user_access(uid)
-    if not user: 
-        return bot.answer_callback_query(call.id, "❌ حسابك غير مؤهل.", show_alert=True)
+    if not user: return bot.answer_callback_query(call.id, "❌ حسابك غير مؤهل.", show_alert=True)
 
     item_preview = stock.find_one({"_id": ObjectId(pid), "sold": False})
-    if not item_preview: 
-        return bot.answer_callback_query(call.id, "❌ نفذت الكمية")
-    if user.get("balance", 0) < item_preview["price"]: 
-        return bot.answer_callback_query(call.id, "❌ الرصيد غير كافي")
+    if not item_preview: return bot.answer_callback_query(call.id, "❌ نفذت الكمية أو تم بيعها.", show_alert=True)
+    
+    product_name = item_preview['name']
+    available = stock.count_documents({"name": product_name, "sold": False})
+    
+    if available == 0:
+        return bot.answer_callback_query(call.id, "❌ نفذت الكمية.", show_alert=True)
 
-    item = stock.find_one_and_update({"_id": ObjectId(pid), "sold": False}, {"$set": {"sold": True}})
-    if not item: 
-        return bot.answer_callback_query(call.id, "❌ نفذت الكمية")
+    msg = bot.send_message(uid, f"📦 المنتج: {product_name}\n📊 المتوفر: {available}\n\n👉 أرسل **الكمية المطلوبة** كأرقام فقط:")
+    bot.register_next_step_handler(msg, process_purchase, user, item_preview, available)
+    bot.answer_callback_query(call.id)
 
-    users.update_one({"_id": uid}, {"$inc": {"balance": -item["price"]}})
+def process_purchase(msg, user, item_ref, available):
+    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم إلغاء الشراء.")
+    uid = msg.chat.id
+    
+    try:
+        qty = int(msg.text.strip())
+        if qty <= 0: raise ValueError
+    except ValueError:
+        return bot.send_message(uid, "❌ الكمية يجب أن تكون رقماً صحيحاً أكبر من صفر. تم الإلغاء.")
 
+    if qty > available:
+        return bot.send_message(uid, f"❌ الكمية المطلوبة غير متوفرة. أقصى كمية: {available}")
+
+    name = item_ref['name']
+    price = item_ref['price']
+    cost = item_ref.get('cost', 0)
+    total_price = qty * price
+    total_cost = qty * cost
+    profit = total_price - total_cost
+
+    # جلب معلومات المستخدم محدثة للتأكد من الرصيد
+    user_fresh = users.find_one({"_id": uid})
+    if user_fresh.get("balance", 0) < total_price: 
+        return bot.send_message(uid, f"❌ رصيدك غير كافي.\nالمطلوب: {total_price}\nرصيدك: {user_fresh.get('balance', 0)}")
+
+    # حجز الأكواد بشكل آمن لمنع التضارب
+    available_docs = list(stock.find({"name": name, "sold": False}).limit(qty))
+    if len(available_docs) < qty:
+        return bot.send_message(uid, "❌ حدث خطأ، الكمية نفذت فجأة. يرجى المحاولة مرة أخرى.")
+
+    doc_ids = [d['_id'] for d in available_docs]
+    res = stock.update_many({"_id": {"$in": doc_ids}, "sold": False}, {"$set": {"sold": True}})
+    
+    if res.modified_count != qty:
+        # إلغاء الحجز لو حدث خطأ بالتزامن
+        stock.update_many({"_id": {"$in": doc_ids}}, {"$set": {"sold": False}})
+        return bot.send_message(uid, "❌ حدث تضارب أثناء الشراء، الرجاء المحاولة مرة أخرى.")
+
+    # خصم الرصيد
+    users.update_one({"_id": uid}, {"$inc": {"balance": -total_price}})
     order_id = get_next_order_id()
-    cost_price = item.get("cost", 0)
-    profit = item["price"] - cost_price
     dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
+    # تسجيل الفاتورة
     transactions.insert_one({
-        "order_id": order_id, 
-        "uid": uid, 
-        "phone": user.get('phone'), 
-        "type": "شراء", 
-        "item_name": item['name'],
-        "price": item["price"], 
-        "cost": cost_price, 
-        "profit": profit, 
-        "date": dt_now
+        "order_id": order_id, "uid": uid, "phone": user_fresh.get('phone'), "type": "شراء", 
+        "item_name": name, "quantity": qty, "price": total_price, "cost": total_cost, "profit": profit, "date": dt_now
     })
 
+    # الإرسال لجوجل شيت
     if SHEET_WEBHOOK_URL and SHEET_WEBHOOK_URL.startswith("http"):
         try:
             requests.post(SHEET_WEBHOOK_URL, json={
-                "order_id": order_id, "date": dt_now, "phone": user.get('phone'),
-                "item_name": item['name'], "price": item["price"], "cost": cost_price, "profit": profit
+                "order_id": order_id, "date": dt_now, "phone": user_fresh.get('phone'),
+                "item_name": f"{name} (x{qty})", "price": total_price, "cost": total_cost, "profit": profit
             }, timeout=3)
         except Exception as e:
             print("Sheet Error:", e)
 
-    bot.send_message(uid, f"✅ تم الشراء بنجاح!\n🧾 رقم الفاتورة: #{order_id}\n\n🎫 الكود الخاص بك:\n`{item['code']}`", parse_mode="Markdown")
-    bot.send_message(ADMIN_ID, f"🛒 شراء جديد | فاتورة #{order_id}\n👤 العميل: `{uid}`\n📱 الهاتف: {user.get('phone')}\n📦 المنتج: {item['name']}\n💰 السعر: {item['price']}\n💵 المربح: {profit}", parse_mode="Markdown")
+    bot.send_message(uid, f"✅ تم شراء {qty} من [{name}] بنجاح!\n🧾 رقم الفاتورة: #{order_id}\n💰 إجمالي المخصوم: {total_price}\n\nجاري تجهيز الأكواد...")
+
+    # تقسيم الأكواد إلى ملفات إكسيل (10 أكواد في كل ملف)
+    purchased_codes = [d['code'] for d in available_docs]
+    chunks = [purchased_codes[i:i + 10] for i in range(0, len(purchased_codes), 10)]
+    
+    for i, chunk in enumerate(chunks):
+        file_stream = generate_excel_file(chunk, i)
+        bot.send_document(uid, document=file_stream, caption=f"📁 الأكواد (الدفعة {i+1} من {len(chunks)})")
+
+    bot.send_message(ADMIN_ID, f"🛒 شراء بالجملة | فاتورة #{order_id}\n👤 العميل: `{uid}`\n📱 الهاتف: {user_fresh.get('phone')}\n📦 المنتج: {name} (الكمية: {qty})\n💰 المدفوع: {total_price}\n💵 المربح: {profit}", parse_mode="Markdown")
 
 # ========= ADMIN =========
 @bot.message_handler(commands=['admin'])
@@ -312,13 +354,13 @@ def back_to_store(msg):
 def invoices_log(msg):
     if msg.chat.id != ADMIN_ID: return
     history = list(transactions.find({"type": "شراء", "order_id": {"$exists": True}}).sort("_id", -1).limit(40))
-    if not history: 
-        return bot.send_message(msg.chat.id, "لا توجد فواتير مبيعات حتى الآن.")
+    if not history: return bot.send_message(msg.chat.id, "لا توجد فواتير مبيعات حتى الآن.")
     
     text = "🧾 **سجل آخر 40 فاتورة:**\n\n"
     for t in history:
         phone_display = t.get('phone', 'بدون')
-        text += f"▪️ #{t['order_id']} | 📱 `{phone_display}` | 🛒 {t['item_name']} | 💰 {t['price']}\n"
+        qty = t.get('quantity', 1)
+        text += f"▪️ #{t['order_id']} | 📱 `{phone_display}` | 🛒 {t['item_name']} (x{qty}) | 💰 {t['price']}\n"
         
     bot.send_message(msg.chat.id, text, parse_mode="Markdown")
 
@@ -340,21 +382,17 @@ def manage_customer_cmd(msg):
     bot.register_next_step_handler(msg, show_customer_panel)
 
 def show_customer_panel(msg):
-    if msg.text in MENU_BUTTONS: 
-        return bot.send_message(msg.chat.id, "تم الإلغاء.")
+    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     u = find_customer(msg.text)
-    if not u: 
-        return bot.send_message(msg.chat.id, "❌ لم يتم العثور على العميل.")
+    if not u: return bot.send_message(msg.chat.id, "❌ لم يتم العثور على العميل.")
         
     uid = u["_id"]
     stat_ar = "نشط" if u.get("status") == "active" else "مجمد"
     info = f"👤 بيانات العميل:\nID: `{uid}`\nالهاتف: `{u.get('phone')}`\nالرصيد: {u.get('balance',0)}\nالحالة: {stat_ar}"
     
     kb = types.InlineKeyboardMarkup()
-    if u.get("status") == "active": 
-        kb.add(types.InlineKeyboardButton("❄️ تجميد", callback_data=f"freeze_{uid}"))
-    else: 
-        kb.add(types.InlineKeyboardButton("✅ تفعيل", callback_data=f"activate_{uid}"))
+    if u.get("status") == "active": kb.add(types.InlineKeyboardButton("❄️ تجميد", callback_data=f"freeze_{uid}"))
+    else: kb.add(types.InlineKeyboardButton("✅ تفعيل", callback_data=f"activate_{uid}"))
     kb.add(types.InlineKeyboardButton("📊 تقرير العمليات", callback_data=f"report_{uid}"))
     
     bot.send_message(msg.chat.id, info, reply_markup=kb, parse_mode="Markdown")
@@ -375,48 +413,80 @@ def admin_customer_actions(call):
         bot.send_message(uid, "✅ تم تفعيل حسابك، يمكنك الاستمتاع بالمتجر.", reply_markup=menu())
     elif action == "report":
         history = list(transactions.find({"uid": uid}).sort("_id", -1).limit(15))
-        if not history: 
-            return bot.answer_callback_query(call.id, "لا يوجد عمليات.", show_alert=True)
+        if not history: return bot.answer_callback_query(call.id, "لا يوجد عمليات.", show_alert=True)
         report_text = f"📊 آخر عمليات العميل `{uid}`:\n\n"
         for t in history:
-            if t["type"] == "شراء": 
-                report_text += f"▪️ {t['date']} | 🛒 {t['item_name']} | بـ {t['price']}\n"
-            else: 
-                report_text += f"▪️ {t['date']} | 💳 {t['type']} | بـ {t['amount']}\n"
+            if t["type"] == "شراء": report_text += f"▪️ {t['date']} | 🛒 {t['item_name']} | بـ {t['price']}\n"
+            else: report_text += f"▪️ {t['date']} | 💳 {t['type']} | بـ {t['amount']}\n"
         bot.send_message(call.message.chat.id, report_text, parse_mode="Markdown")
 
-# ===== ADD PRODUCT =====
+# ===== ADD PRODUCT (TEXT OR EXCEL) =====
 @bot.message_handler(func=lambda m: m.text == "➕ منتج")
 def add_product(msg):
     if msg.chat.id != ADMIN_ID: return
-    bot.send_message(msg.chat.id, "القسم:الفئة:الاسم:السعر:التكلفة\nكود1\nكود2")
-    bot.register_next_step_handler(msg, save_product)
+    bot.send_message(msg.chat.id, "أرسل بيانات المنتج بالتنسيق التالي:\n\nالقسم:الفئة:الاسم:السعر:التكلفة")
+    bot.register_next_step_handler(msg, save_product_info)
 
-def save_product(msg):
-    if msg.text in MENU_BUTTONS: 
-        return bot.send_message(msg.chat.id, "تم الإلغاء.")
+def save_product_info(msg):
+    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     try:
-        lines = msg.text.split("\n")
-        cat, sub, name, price, cost = lines[0].split(":")
-        price = int(price.strip())
-        cost = int(cost.strip())
-        docs = []
-        for c in lines[1:]:
-            if c.strip() == "": continue
-            docs.append({
-                "category": cat.strip(), 
-                "subcategory": sub.strip(), 
-                "name": name.strip(),
-                "price": price, 
-                "cost": cost, 
-                "code": c.strip(), 
-                "sold": False
-            })
-        if docs:
-            stock.insert_many(docs)
-            bot.send_message(msg.chat.id, f"✅ تم إضافة {len(docs)} كود.\nالسعر: {price} | التكلفة: {cost} | الربح المتوقع: {price-cost}")
+        cat, sub, name, price, cost = msg.text.split(":")
+        temp_admin_data[msg.chat.id] = {
+            "cat": cat.strip(), "sub": sub.strip(), "name": name.strip(),
+            "price": int(price.strip()), "cost": int(cost.strip())
+        }
+        
+        bot.send_message(
+            msg.chat.id, 
+            "✅ تم حفظ البيانات.\n\nالآن أرسل الأكواد إما كـ **رسالة نصية** (كل كود في سطر) أو قم برفع **ملف إكسيل (.xlsx)** يحتوي على الأكواد في العمود الأول (A)."
+        )
+        bot.register_next_step_handler(msg, process_product_codes)
     except Exception as e:
-        bot.send_message(msg.chat.id, f"❌ خطأ، تأكد من وجود 5 عناصر (قسم:فئة:اسم:سعر:تكلفة)\n{e}")
+        bot.send_message(msg.chat.id, f"❌ خطأ في التنسيق. تأكد من وجود 5 عناصر.\n{e}")
+
+def process_product_codes(msg):
+    if msg.text and msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
+    
+    data = temp_admin_data.get(msg.chat.id)
+    if not data: return bot.send_message(msg.chat.id, "❌ حدث خطأ، يرجى إعادة المحاولة من زر (➕ منتج).")
+
+    codes = []
+    
+    if msg.document:
+        if not msg.document.file_name.endswith('.xlsx'):
+            return bot.send_message(msg.chat.id, "❌ يرجى رفع ملف بصيغة .xlsx فقط.")
+        
+        bot.send_message(msg.chat.id, "⏳ جاري قراءة ملف الإكسيل...")
+        try:
+            file_info = bot.get_file(msg.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            file_stream = io.BytesIO(downloaded_file)
+            
+            wb = openpyxl.load_workbook(file_stream)
+            ws = wb.active
+            for row in ws.iter_rows(values_only=True):
+                if row and row[0]: # إذا كان العمود الأول A غير فارغ
+                    codes.append(str(row[0]).strip())
+        except Exception as e:
+            return bot.send_message(msg.chat.id, f"❌ حدث خطأ أثناء قراءة الملف:\n{e}")
+            
+    elif msg.text:
+        codes = [c.strip() for c in msg.text.split("\n") if c.strip()]
+        
+    if not codes:
+        return bot.send_message(msg.chat.id, "❌ لم يتم العثور على أكواد.")
+
+    docs = []
+    for c in codes:
+        docs.append({
+            "category": data['cat'], "subcategory": data['sub'], "name": data['name'],
+            "price": data['price'], "cost": data['cost'], "code": c, "sold": False
+        })
+        
+    stock.insert_many(docs)
+    bot.send_message(msg.chat.id, f"✅ تم إضافة {len(docs)} كود بنجاح للمنتج [{data['name']}].\nالسعر: {data['price']} | التكلفة: {data['cost']}")
+    # تنظيف الذاكرة
+    del temp_admin_data[msg.chat.id]
 
 # ===== SET BALANCE =====
 @bot.message_handler(func=lambda m: m.text == "💰 ضبط الرصيد")
@@ -426,8 +496,7 @@ def set_balance_cmd(msg):
     bot.register_next_step_handler(msg, do_set_balance)
 
 def do_set_balance(msg):
-    if msg.text in MENU_BUTTONS: 
-        return bot.send_message(msg.chat.id, "تم الإلغاء.")
+    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     try:
         phone_str, val_str = msg.text.split(":")
         u = find_customer(phone_str)
@@ -435,9 +504,7 @@ def do_set_balance(msg):
             new_bal = int(val_str.strip())
             users.update_one({"_id": u["_id"]}, {"$set": {"balance": new_bal}})
             transactions.insert_one({
-                "uid": u["_id"], 
-                "type": "ضبط رصيد", 
-                "amount": new_bal, 
+                "uid": u["_id"], "type": "ضبط رصيد", "amount": new_bal, 
                 "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
             })
             bot.send_message(msg.chat.id, f"✅ تم ضبط رصيد العميل {u.get('phone')} ليصبح {new_bal}")
@@ -455,8 +522,7 @@ def direct(msg):
     bot.register_next_step_handler(msg, do_charge)
 
 def do_charge(msg):
-    if msg.text in MENU_BUTTONS: 
-        return bot.send_message(msg.chat.id, "تم الإلغاء.")
+    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     try:
         phone_str, amt_str = msg.text.split(":")
         u = find_customer(phone_str)
@@ -464,9 +530,7 @@ def do_charge(msg):
             amt = int(amt_str.strip())
             users.update_one({"_id": u["_id"]}, {"$inc": {"balance": amt}})
             transactions.insert_one({
-                "uid": u["_id"], 
-                "type": "شحن إضافي", 
-                "amount": amt, 
+                "uid": u["_id"], "type": "شحن إضافي", "amount": amt, 
                 "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
             })
             bot.send_message(msg.chat.id, f"✅ تم إضافة {amt} لرصيد العميل {u.get('phone')}")
@@ -484,8 +548,7 @@ def gen_cards(msg):
     bot.register_next_step_handler(msg, create_cards)
 
 def create_cards(msg):
-    if msg.text in MENU_BUTTONS: 
-        return bot.send_message(msg.chat.id, "تم الإلغاء.")
+    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     try:
         count, val = map(int, msg.text.split(":"))
         arr = []
@@ -502,10 +565,8 @@ def create_cards(msg):
 # ========= DUMMY WEB SERVER FOR RENDER =========
 app = Flask(__name__)
 @app.route('/')
-def home(): 
-    return "Bot is running perfectly!"
-def run_web_server(): 
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+def home(): return "Bot is running with Excel Integration!"
+def run_web_server(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
 # ========= RUN =========
 if __name__ == "__main__":
@@ -513,5 +574,5 @@ if __name__ == "__main__":
     bot.remove_webhook()
     print("⏳ Waiting for old instance to shut down...")
     time.sleep(5)
-    print("🚀 PRO BOT STARTED")
+    print("🚀 EXCEL BOT STARTED")
     bot.infinity_polling()
