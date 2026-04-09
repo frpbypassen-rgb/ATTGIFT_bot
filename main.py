@@ -117,7 +117,7 @@ def start(msg):
 
     if not u:
         users.insert_one({
-            "_id": uid, "balance": 0, "status": "frozen", "phone": None, "failed_attempts": 0, "join": datetime.datetime.now()
+            "_id": uid, "balance": 0.0, "status": "frozen", "phone": None, "failed_attempts": 0, "join": datetime.datetime.now()
         })
         u = {"phone": None, "status": "frozen"}
 
@@ -149,7 +149,7 @@ def account(msg):
     if not u or not u.get("phone"): return bot.send_message(msg.chat.id, "⚠️ أرسل رقم هاتفك أولاً.", reply_markup=contact_menu())
 
     status_text = "نشط ✅" if u.get("status") == "active" else "مجمد ❄️"
-    text = f"👤 **بيانات حسابك**\n\n🆔 ID: `{msg.chat.id}`\n📱 الهاتف: `{u.get('phone')}`\n💰 رصيدك: **{u.get('balance',0)}**\nحالة الحساب: {status_text}"
+    text = f"👤 **بيانات حسابك**\n\n🆔 ID: `{msg.chat.id}`\n📱 الهاتف: `{u.get('phone')}`\n💰 رصيدك: **{u.get('balance', 0.0)}**\nحالة الحساب: {status_text}"
     
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -213,8 +213,8 @@ def check_card(msg):
             attempts_left = 5 - failed_attempts
             return bot.send_message(uid, f"❌ كود غير صالح. (متبقي لك {attempts_left} محاولات قبل تجميد الحساب)")
 
-    users.update_one({"_id": uid}, {"$inc": {"balance": card["value"]}, "$set": {"failed_attempts": 0}})
-    transactions.insert_one({"uid": uid, "type": "شحن كارت", "amount": card["value"], "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")})
+    users.update_one({"_id": uid}, {"$inc": {"balance": float(card["value"])}, "$set": {"failed_attempts": 0}})
+    transactions.insert_one({"uid": uid, "type": "شحن كارت", "amount": float(card["value"]), "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")})
     bot.send_message(uid, f"✅ تم شحن رصيدك بقيمة {card['value']} بنجاح")
 
 # ========= SHOP =========
@@ -286,14 +286,14 @@ def process_purchase(msg, user, item_ref, available):
         return bot.send_message(uid, f"❌ الكمية المطلوبة غير متوفرة. أقصى كمية: {available}")
 
     name = item_ref['name']
-    price = item_ref['price']
-    cost = item_ref.get('cost', 0)
+    price = float(item_ref['price'])
+    cost = float(item_ref.get('cost', 0.0))
     total_price = qty * price
     total_cost = qty * cost
     profit = total_price - total_cost
 
     user_fresh = users.find_one({"_id": uid})
-    if user_fresh.get("balance", 0) < total_price: 
+    if float(user_fresh.get("balance", 0.0)) < total_price: 
         return bot.send_message(uid, f"❌ رصيدك غير كافي.\nالمطلوب: {total_price}\nرصيدك: {user_fresh.get('balance', 0)}")
 
     available_docs = list(stock.find({"name": name, "sold": False}).limit(qty))
@@ -432,7 +432,7 @@ def save_product_info(msg):
         cat, sub, name, price, cost = msg.text.split(":")
         temp_admin_data[msg.chat.id] = {
             "cat": cat.strip(), "sub": sub.strip(), "name": name.strip(),
-            "price": int(price.strip()), "cost": int(cost.strip())
+            "price": float(price.strip()), "cost": float(cost.strip())
         }
         
         bot.send_message(
@@ -499,7 +499,7 @@ def process_product_codes(msg):
 @bot.message_handler(func=lambda m: m.text == "💰 ضبط الرصيد")
 def set_balance_cmd(msg):
     if msg.chat.id != ADMIN_ID: return
-    bot.send_message(msg.chat.id, "أرسل (رقم_الهاتف:الرصيد_الجديد)\nمثال: 0940719000:500")
+    bot.send_message(msg.chat.id, "أرسل (رقم_الهاتف:الرصيد_الجديد)\nمثال: 0940719000:500.5")
     bot.register_next_step_handler(msg, do_set_balance)
 
 def do_set_balance(msg):
@@ -508,7 +508,7 @@ def do_set_balance(msg):
         phone_str, val_str = msg.text.split(":")
         u = find_customer(phone_str)
         if u:
-            new_bal = int(val_str.strip())
+            new_bal = float(val_str.strip())
             users.update_one({"_id": u["_id"]}, {"$set": {"balance": new_bal}})
             transactions.insert_one({
                 "uid": u["_id"], "type": "ضبط رصيد", "amount": new_bal, 
@@ -525,7 +525,7 @@ def do_set_balance(msg):
 @bot.message_handler(func=lambda m: m.text == "💳 شحن يدوي")
 def direct(msg):
     if msg.chat.id != ADMIN_ID: return
-    bot.send_message(msg.chat.id, "أرسل (رقم_الهاتف:قيمة_الإضافة)\nمثال: 0940719000:50")
+    bot.send_message(msg.chat.id, "أرسل (رقم_الهاتف:قيمة_الإضافة)\nمثال: 0940719000:50.75")
     bot.register_next_step_handler(msg, do_charge)
 
 def do_charge(msg):
@@ -534,7 +534,7 @@ def do_charge(msg):
         phone_str, amt_str = msg.text.split(":")
         u = find_customer(phone_str)
         if u:
-            amt = int(amt_str.strip())
+            amt = float(amt_str.strip())
             users.update_one({"_id": u["_id"]}, {"$inc": {"balance": amt}})
             transactions.insert_one({
                 "uid": u["_id"], "type": "شحن إضافي", "amount": amt, 
@@ -551,13 +551,15 @@ def do_charge(msg):
 @bot.message_handler(func=lambda m: m.text == "🎫 توليد")
 def gen_cards(msg):
     if msg.chat.id != ADMIN_ID: return
-    bot.send_message(msg.chat.id, "أرسل (العدد:القيمة)")
+    bot.send_message(msg.chat.id, "أرسل (العدد:القيمة)\nمثال: 10:15.5")
     bot.register_next_step_handler(msg, create_cards)
 
 def create_cards(msg):
     if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     try:
-        count, val = map(int, msg.text.split(":"))
+        count_str, val_str = msg.text.split(":")
+        count = int(count_str)
+        val = float(val_str)
         arr = []
         txt = f"✅ تم توليد {count} كروت بقيمة {val}:\n\n"
         for _ in range(count):
@@ -572,7 +574,7 @@ def create_cards(msg):
 # ========= DUMMY WEB SERVER FOR RENDER =========
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot is running with Excel Integration!"
+def home(): return "Bot is running with Excel Integration & Float Values!"
 def run_web_server(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
 # ========= RUN =========
