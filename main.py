@@ -324,22 +324,23 @@ def process_purchase(msg, user, item_ref, available):
 
     bot.send_message(uid, f"✅ تم الشراء بنجاح!\n🧾 رقم الفاتورة: #{order_id}\n💰 إجمالي المخصوم: {total_price}\n\nجاري تجهيز الأكواد وإرسالها في ملفات إكسيل...", parse_mode="Markdown")
 
-    # إشعار الإدارة بعملية الشراء
+    # إرسال الفاتورة للإدارة
     bot.send_message(ADMIN_ID, f"🛒 شراء بالجملة | فاتورة #{order_id}\n👤 العميل: `{uid}`\n📱 الهاتف: {user_fresh.get('phone')}\n📦 المنتج: {name} (الكمية: {qty})\n💰 المدفوع: {total_price}\n💵 المربح: {profit}", parse_mode="Markdown")
 
     purchased_items_data = [{'code': d['code'], 'serial': d.get('serial', 'بدون_تسلسلي')} for d in available_docs]
     chunks = [purchased_items_data[i:i + 10] for i in range(0, len(purchased_items_data), 10)]
     
     for i, chunk in enumerate(chunks):
-        # إنشاء الملف
         file_stream = generate_excel_file(chunk, i)
-        
-        # إرسال الملف للعميل
         bot.send_document(uid, document=file_stream, caption=f"📁 الأكواد (الدفعة {i+1} من {len(chunks)})")
         
-        # إعادة المؤشر للبداية لإرسال نفس الملف للإدارة
         file_stream.seek(0)
         bot.send_document(ADMIN_ID, document=file_stream, caption=f"📁 نسخة للإدارة | فاتورة #{order_id} | الدفعة {i+1}")
+
+    # التنبيه عند نقص المخزون
+    remaining_stock = stock.count_documents({"name": name, "sold": False})
+    if remaining_stock <= 30:
+        bot.send_message(ADMIN_ID, f"⚠️ **تنبيه نقص مخزون** ⚠️\n\nالمنتج: `{name}`\nالكمية المتبقية: **{remaining_stock}** كود فقط!\nيرجى إعادة تعبئة المخزون قريباً لتجنب نفاذ الكمية.", parse_mode="Markdown")
 
 # ========= ADMIN =========
 @bot.message_handler(commands=['admin'])
