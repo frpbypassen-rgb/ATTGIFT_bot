@@ -16,7 +16,10 @@ import openpyxl
 
 # ========= CONFIG =========
 API_TOKEN = "8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc"
-ADMIN_ID = 1262656649
+
+# ضع هنا معرفات (IDs) كل المدراء مفصولة بفاصلة
+ADMIN_IDS = [1262656649] 
+
 MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT"
 
 # رابط جوجل شيت لتسجيل الفواتير والأرباح
@@ -104,6 +107,20 @@ def generate_excel_file(items_data, index):
     wb.save(file_stream)
     file_stream.seek(0)
     file_stream.name = f"Codes_Part_{index+1}.xlsx"
+    return file_stream
+
+def generate_products_template():
+    """توليد قالب إكسيل فارغ جاهز لملء المنتجات"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Products_Template"
+    headers = ["القسم", "الفئة", "الاسم", "السعر", "التكلفة", "الكود", "الرقم التسلسلي"]
+    ws.append(headers)
+    
+    file_stream = io.BytesIO()
+    wb.save(file_stream)
+    file_stream.seek(0)
+    file_stream.name = "Template_Products.xlsx"
     return file_stream
 
 # ========= START & CONTACT HANDLER =========
@@ -324,8 +341,10 @@ def process_purchase(msg, user, item_ref, available):
 
     bot.send_message(uid, f"✅ تم الشراء بنجاح!\n🧾 رقم الفاتورة: #{order_id}\n💰 إجمالي المخصوم: {total_price}\n\nجاري تجهيز الأكواد وإرسالها في ملفات إكسيل...", parse_mode="Markdown")
 
-    # إرسال الفاتورة للإدارة
-    bot.send_message(ADMIN_ID, f"🛒 شراء بالجملة | فاتورة #{order_id}\n👤 العميل: `{uid}`\n📱 الهاتف: {user_fresh.get('phone')}\n📦 المنتج: {name} (الكمية: {qty})\n💰 المدفوع: {total_price}\n💵 المربح: {profit}", parse_mode="Markdown")
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, f"🛒 شراء جديد بالجملة | فاتورة #{order_id}\n👤 العميل: `{uid}`\n📱 الهاتف: {user_fresh.get('phone')}\n📦 المنتج: {name} (الكمية: {qty})\n💰 المدفوع: {total_price}\n💵 المربح: {profit}", parse_mode="Markdown")
+        except: pass
 
     purchased_items_data = [{'code': d['code'], 'serial': d.get('serial', 'بدون_تسلسلي')} for d in available_docs]
     chunks = [purchased_items_data[i:i + 10] for i in range(0, len(purchased_items_data), 10)]
@@ -334,29 +353,34 @@ def process_purchase(msg, user, item_ref, available):
         file_stream = generate_excel_file(chunk, i)
         bot.send_document(uid, document=file_stream, caption=f"📁 الأكواد (الدفعة {i+1} من {len(chunks)})")
         
-        file_stream.seek(0)
-        bot.send_document(ADMIN_ID, document=file_stream, caption=f"📁 نسخة للإدارة | فاتورة #{order_id} | الدفعة {i+1}")
+        for admin_id in ADMIN_IDS:
+            try:
+                file_stream.seek(0)
+                bot.send_document(admin_id, document=file_stream, caption=f"📁 نسخة للإدارة | فاتورة #{order_id} | الدفعة {i+1}")
+            except: pass
 
-    # التنبيه عند نقص المخزون
     remaining_stock = stock.count_documents({"name": name, "sold": False})
     if remaining_stock <= 30:
-        bot.send_message(ADMIN_ID, f"⚠️ **تنبيه نقص مخزون** ⚠️\n\nالمنتج: `{name}`\nالكمية المتبقية: **{remaining_stock}** كود فقط!\nيرجى إعادة تعبئة المخزون قريباً لتجنب نفاذ الكمية.", parse_mode="Markdown")
+        for admin_id in ADMIN_IDS:
+            try:
+                bot.send_message(admin_id, f"⚠️ **تنبيه نقص مخزون** ⚠️\n\nالمنتج: `{name}`\nالكمية المتبقية: **{remaining_stock}** كود فقط!\nيرجى إعادة تعبئة المخزون قريباً لتجنب نفاذ الكمية.", parse_mode="Markdown")
+            except: pass
 
 # ========= ADMIN =========
 @bot.message_handler(commands=['admin'])
 def admin(msg):
-    if msg.chat.id != ADMIN_ID: return
+    if msg.chat.id not in ADMIN_IDS: return
     bot.send_message(msg.chat.id, "👑 لوحة تحكم الإدارة", reply_markup=admin_menu())
 
 @bot.message_handler(func=lambda m: m.text == "🏪 العودة للمتجر")
 def back_to_store(msg):
-    if msg.chat.id != ADMIN_ID: return
+    if msg.chat.id not in ADMIN_IDS: return
     bot.send_message(msg.chat.id, "🔄 تم تحويلك لوضع العميل", reply_markup=menu())
 
 # ===== MANAGE STOCK =====
 @bot.message_handler(func=lambda m: m.text == "📦 إدارة المخزون")
 def manage_stock_cmd(msg):
-    if msg.chat.id != ADMIN_ID: return
+    if msg.chat.id not in ADMIN_IDS: return
     
     names = stock.distinct("name", {"sold": False})
     if not names: 
@@ -447,7 +471,7 @@ def delete_stock_qty(msg, name):
 # ===== INVOICE LOG =====
 @bot.message_handler(func=lambda m: m.text == "🧾 سجل الفواتير")
 def invoices_log(msg):
-    if msg.chat.id != ADMIN_ID: return
+    if msg.chat.id not in ADMIN_IDS: return
     history = list(transactions.find({"type": "شراء", "order_id": {"$exists": True}}).sort("_id", -1).limit(40))
     if not history: return bot.send_message(msg.chat.id, "لا توجد فواتير مبيعات حتى الآن.")
     
@@ -462,7 +486,7 @@ def invoices_log(msg):
 # ===== USERS =====
 @bot.message_handler(func=lambda m: m.text == "👥 المستخدمين")
 def users_list(msg):
-    if msg.chat.id != ADMIN_ID: return
+    if msg.chat.id not in ADMIN_IDS: return
     text = "👥 قائمة آخر المستخدمين:\n\n"
     for u in users.find().sort("join", -1).limit(30):
         stat = "✅" if u.get('status') == 'active' else "❄️"
@@ -472,7 +496,7 @@ def users_list(msg):
 # ===== MANAGE CUSTOMER =====
 @bot.message_handler(func=lambda m: m.text == "⚙️ إدارة عميل")
 def manage_customer_cmd(msg):
-    if msg.chat.id != ADMIN_ID: return
+    if msg.chat.id not in ADMIN_IDS: return
     bot.send_message(msg.chat.id, "أرسل رقم هاتف العميل (أو الـ ID):")
     bot.register_next_step_handler(msg, show_customer_panel)
 
@@ -515,15 +539,87 @@ def admin_customer_actions(call):
             else: report_text += f"▪️ {t['date']} | 💳 {t['type']} | بـ {t['amount']}\n"
         bot.send_message(call.message.chat.id, report_text, parse_mode="Markdown")
 
-# ===== ADD PRODUCT (TEXT OR EXCEL WITH SERIAL) =====
+# ===== ADD PRODUCT (TEMPLATE & MANUAL) =====
 @bot.message_handler(func=lambda m: m.text == "➕ منتج")
 def add_product(msg):
-    if msg.chat.id != ADMIN_ID: return
-    bot.send_message(msg.chat.id, "أرسل بيانات المنتج بالتنسيق التالي:\n\nالقسم:الفئة:الاسم:السعر:التكلفة")
-    bot.register_next_step_handler(msg, save_product_info)
+    if msg.chat.id not in ADMIN_IDS: return
+    
+    text = "اختر طريقة إضافة المنتجات:\n\n"
+    text += "📁 **الطريقة الأولى (موصى بها): القالب الشامل**\n"
+    text += "قم بتحميل القالب المرفق، املأه بالمنتجات والأكواد (يمكنك إضافة أقسام ومنتجات مختلفة في نفس الملف دفعة واحدة)، ثم أعد رفعه هنا.\n\n"
+    text += "✍️ **الطريقة الثانية: الإضافة اليدوية لمنتج واحد**\n"
+    text += "أرسل بيانات المنتج بالتنسيق التالي:\n`القسم:الفئة:الاسم:السعر:التكلفة`"
+    
+    try:
+        template = generate_products_template()
+        bot.send_document(msg.chat.id, template, caption=text, parse_mode="Markdown")
+        bot.register_next_step_handler(msg, handle_add_product_choice)
+    except Exception as e:
+        bot.send_message(msg.chat.id, f"❌ حدث خطأ: {e}")
+
+def handle_add_product_choice(msg):
+    if msg.text and msg.text in MENU_BUTTONS: 
+        return bot.send_message(msg.chat.id, "تم الإلغاء.")
+        
+    if msg.document:
+        if not msg.document.file_name.endswith('.xlsx'):
+            return bot.send_message(msg.chat.id, "❌ يرجى رفع ملف بصيغة .xlsx فقط.")
+        
+        bot.send_message(msg.chat.id, "⏳ جاري قراءة القالب واستيراد المنتجات...")
+        try:
+            file_info = bot.get_file(msg.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            file_stream = io.BytesIO(downloaded_file)
+            
+            wb = openpyxl.load_workbook(file_stream)
+            ws = wb.active
+            
+            docs = []
+            errors = 0
+            
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i == 0: continue # تخطي صف العناوين
+                if not any(row): continue # تخطي الصفوف الفارغة بالكامل
+                
+                try:
+                    cat = str(row[0]).strip() if row[0] else ""
+                    sub = str(row[1]).strip() if row[1] else ""
+                    name = str(row[2]).strip() if row[2] else ""
+                    price = float(row[3]) if row[3] is not None else 0.0
+                    cost = float(row[4]) if row[4] is not None else 0.0
+                    code_val = str(row[5]).strip() if row[5] else ""
+                    serial_val = str(row[6]).strip() if len(row) > 6 and row[6] else "بدون_تسلسلي"
+                    
+                    if not all([cat, sub, name, code_val]):
+                        errors += 1
+                        continue
+                        
+                    docs.append({
+                        "category": cat, "subcategory": sub, "name": name,
+                        "price": price, "cost": cost, 
+                        "code": code_val, "serial": serial_val, "sold": False
+                    })
+                except Exception as e:
+                    errors += 1
+                    continue
+            
+            if docs:
+                stock.insert_many(docs)
+                msg_res = f"✅ تم استيراد وإضافة {len(docs)} كود للمتجر بنجاح!"
+                if errors > 0: 
+                    msg_res += f"\n⚠️ تم تخطي {errors} صف لوجود بيانات ناقصة أو غير صحيحة (تأكد من كتابة السعر والتكلفة كأرقام)."
+                bot.send_message(msg.chat.id, msg_res)
+            else:
+                bot.send_message(msg.chat.id, "❌ لم يتم استيراد أي بيانات. تأكد من تعبئة القالب بشكل صحيح.")
+        except Exception as e:
+            bot.send_message(msg.chat.id, f"❌ حدث خطأ أثناء معالجة الملف:\n{e}")
+            
+    elif msg.text and ":" in msg.text:
+        save_product_info(msg)
+    else:
+        bot.send_message(msg.chat.id, "❌ إدخال غير صالح. قم بطلب `➕ منتج` مرة أخرى.")
 
 def save_product_info(msg):
-    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     try:
         cat, sub, name, price, cost = msg.text.split(":")
         if msg.chat.id not in temp_admin_data: temp_admin_data[msg.chat.id] = {}
@@ -534,41 +630,20 @@ def save_product_info(msg):
         
         bot.send_message(
             msg.chat.id, 
-            "✅ تم حفظ البيانات.\n\nالآن قم برفع **ملف إكسيل (.xlsx)** يحتوي على:\n- العمود (A): الكود\n- العمود (B): الرقم التسلسلي (اختياري)\n\nأو كـ **رسالة نصية** (الكود:التسلسلي في كل سطر)."
+            "✅ تم حفظ بيانات المنتج.\n\nالآن أرسل الأكواد كـ **رسالة نصية** (الكود:التسلسلي في كل سطر)."
         )
-        bot.register_next_step_handler(msg, process_product_codes)
+        bot.register_next_step_handler(msg, process_product_codes_manual)
     except Exception as e:
-        bot.send_message(msg.chat.id, f"❌ خطأ في التنسيق. تأكد من وجود 5 عناصر.\n{e}")
+        bot.send_message(msg.chat.id, f"❌ خطأ في التنسيق. تأكد من وجود 5 عناصر مفصولة بـ (:)\n{e}")
 
-def process_product_codes(msg):
+def process_product_codes_manual(msg):
     if msg.text and msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
     
     data = temp_admin_data.get(msg.chat.id, {}).get("new_product")
     if not data: return bot.send_message(msg.chat.id, "❌ حدث خطأ، يرجى إعادة المحاولة من زر (➕ منتج).")
 
     codes = []
-    
-    if msg.document:
-        if not msg.document.file_name.endswith('.xlsx'):
-            return bot.send_message(msg.chat.id, "❌ يرجى رفع ملف بصيغة .xlsx فقط.")
-        
-        bot.send_message(msg.chat.id, "⏳ جاري قراءة ملف الإكسيل واستخراج الأكواد والأرقام التسلسلية...")
-        try:
-            file_info = bot.get_file(msg.document.file_id)
-            downloaded_file = bot.download_file(file_info.file_path)
-            file_stream = io.BytesIO(downloaded_file)
-            
-            wb = openpyxl.load_workbook(file_stream)
-            ws = wb.active
-            for row in ws.iter_rows(values_only=True):
-                if row and row[0]: # إذا كان العمود A غير فارغ
-                    code_val = str(row[0]).strip()
-                    serial_val = str(row[1]).strip() if len(row) > 1 and row[1] else "بدون_تسلسلي"
-                    codes.append({"code": code_val, "serial": serial_val})
-        except Exception as e:
-            return bot.send_message(msg.chat.id, f"❌ حدث خطأ أثناء قراءة الملف:\n{e}")
-            
-    elif msg.text:
+    if msg.text:
         for line in msg.text.split("\n"):
             if line.strip():
                 parts = line.split(":")
@@ -588,14 +663,14 @@ def process_product_codes(msg):
         })
         
     stock.insert_many(docs)
-    bot.send_message(msg.chat.id, f"✅ تم إضافة {len(docs)} كود (مع الأرقام التسلسلية) بنجاح للمنتج [{data['name']}].\nالسعر: {data['price']} | التكلفة: {data['cost']}")
+    bot.send_message(msg.chat.id, f"✅ تم إضافة {len(docs)} كود بنجاح للمنتج [{data['name']}].")
     if msg.chat.id in temp_admin_data and "new_product" in temp_admin_data[msg.chat.id]:
         del temp_admin_data[msg.chat.id]["new_product"]
 
 # ===== SET BALANCE =====
 @bot.message_handler(func=lambda m: m.text == "💰 ضبط الرصيد")
 def set_balance_cmd(msg):
-    if msg.chat.id != ADMIN_ID: return
+    if msg.chat.id not in ADMIN_IDS: return
     bot.send_message(msg.chat.id, "أرسل (رقم_الهاتف:الرصيد_الجديد)\nمثال: 0940719000:500.5")
     bot.register_next_step_handler(msg, do_set_balance)
 
@@ -621,7 +696,7 @@ def do_set_balance(msg):
 # ===== DIRECT CHARGE =====
 @bot.message_handler(func=lambda m: m.text == "💳 شحن يدوي")
 def direct(msg):
-    if msg.chat.id != ADMIN_ID: return
+    if msg.chat.id not in ADMIN_IDS: return
     bot.send_message(msg.chat.id, "أرسل (رقم_الهاتف:قيمة_الإضافة)\nمثال: 0940719000:50.75")
     bot.register_next_step_handler(msg, do_charge)
 
@@ -647,7 +722,7 @@ def do_charge(msg):
 # ===== GENERATE CARDS =====
 @bot.message_handler(func=lambda m: m.text == "🎫 توليد")
 def gen_cards(msg):
-    if msg.chat.id != ADMIN_ID: return
+    if msg.chat.id not in ADMIN_IDS: return
     bot.send_message(msg.chat.id, "أرسل (العدد:القيمة)\nمثال: 10:15.5")
     bot.register_next_step_handler(msg, create_cards)
 
