@@ -13,6 +13,8 @@ import time
 import requests 
 import io
 import openpyxl 
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.utils import get_column_letter
 
 # ========= CONFIG =========
 API_TOKEN = "8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc"
@@ -22,7 +24,7 @@ ADMIN_IDS = [1262656649]
 
 MONGO_URI = "mongodb+srv://frpbypassen_db_user:LpovkVYkrNU7qePp@attgift.rdamxpj.mongodb.net/?retryWrites=true&w=majority&appName=ATTGIFT"
 
-# رابط جوجل شيت لتسجيل الفواتير والأرباح
+# رابط جوجل شيت لتسجيل الفواتير (بدون تكلفة)
 SHEET_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbzPrw8oANq8Aek6O6URoTU0kDVjb1ZtoVdYkhpqAqM6Nuws4ZmcPRC9JtoNZvWoMzUb/exec"
 
 bot = telebot.TeleBot(API_TOKEN)
@@ -66,7 +68,7 @@ def check_user_access(uid):
         bot.send_message(uid, "تم حظرك من قبل الادارة وللاستفسار تواصل معنا")
         return None
     if u.get("status") != "active":
-        bot.send_message(uid, "❌ حساب مجمد. برجاء التواصل مع الدعم الفني.")
+        bot.send_message(uid, "❌ حسابك قيد المراجعة. برجاء الانتظار حتى تفعيل الإدارة.")
         return None
     return u
 
@@ -87,23 +89,79 @@ def get_next_order_id():
     )
     return doc["seq"]
 
-def generate_excel_file(items_data, index):
+def generate_customer_excel_file(items_data, order_id, dt_now, product_name):
+    """توليد ملف الإكسيل الاحترافي للعميل بعد الشراء"""
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Codes"
-    ws.append(["الكود", "الرقم التسلسلي"])
-    for data in items_data: ws.append([data['code'], data['serial']])
+    ws.title = f"Invoice_{order_id}"
+    
+    title_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid") 
+    info_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid") 
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid") 
+    
+    title_font = Font(color="FFFFFF", bold=True, size=16)
+    info_font = Font(bold=True, size=12)
+    header_font = Font(color="FFFFFF", bold=True, size=13)
+    center_aligned = Alignment(horizontal="center", vertical="center")
+    
+    ws.merge_cells('A1:E1')
+    ws['A1'] = "شركة الأهرام للإتصالات والتقنية"
+    ws['A1'].font = title_font
+    ws['A1'].fill = title_fill
+    ws['A1'].alignment = center_aligned
+    ws.row_dimensions[1].height = 30
+    
+    ws.merge_cells('A2:E2')
+    ws['A2'] = f"رقم الفاتورة: #{order_id}   |   التاريخ: {dt_now}"
+    ws['A2'].font = info_font
+    ws['A2'].fill = info_fill
+    ws['A2'].alignment = center_aligned
+    ws.row_dimensions[2].height = 25
+    
+    ws.append([])
+    
+    headers = ["م", "اسم المنتج", "الكود", "الرقم التسلسلي", "PIN"]
+    ws.append(headers)
+    
+    for col_num in range(1, 6):
+        cell = ws.cell(row=4, column=col_num)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_aligned
+    ws.row_dimensions[4].height = 20
+        
+    for idx, data in enumerate(items_data, 1):
+        row = [idx, product_name, data['code'], data.get('serial', 'بدون'), data.get('pin', 'بدون')]
+        ws.append(row)
+        for col_num in range(1, 6):
+            ws.cell(row=ws.max_row, column=col_num).alignment = center_aligned
+            
+    for col in ws.columns:
+        max_length = 0
+        column_letter = get_column_letter(col[0].column)
+        for cell in col:
+            try:
+                if cell.value and len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except: pass
+        
+        adjusted_width = (max_length + 4)
+        if adjusted_width < 15: adjusted_width = 15
+        if column_letter == 'A': adjusted_width = 8
+        ws.column_dimensions[column_letter].width = adjusted_width
+        
     file_stream = io.BytesIO()
     wb.save(file_stream)
     file_stream.seek(0)
-    file_stream.name = f"Codes_Part_{index+1}.xlsx"
+    file_stream.name = f"Invoice_{order_id}.xlsx"
     return file_stream
 
 def generate_products_template():
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Products_Template"
-    ws.append(["القسم", "الفئة", "الاسم", "السعر", "التكلفة", "الكود", "الرقم التسلسلي"])
+    # إلغاء التكلفة، وإضافة PIN
+    ws.append(["القسم", "الفئة", "الاسم", "السعر", "الكود", "الرقم التسلسلي", "PIN"])
     file_stream = io.BytesIO()
     wb.save(file_stream)
     file_stream.seek(0)
@@ -115,36 +173,33 @@ def generate_admin_report_excel(report_type, history_data, summary_data=None):
     ws1 = wb.active
     if report_type == "all":
         ws1.title = "سجل العمليات"
-        ws1.append(["رقم الفاتورة", "التاريخ", "الهاتف", "نوع العملية", "البيان", "الكمية", "المبلغ", "المربح"])
+        ws1.append(["رقم الفاتورة", "التاريخ", "الهاتف", "نوع العملية", "البيان", "الكمية", "المبلغ"])
         for t in history_data:
             ws1.append([
                 t.get("order_id", "-"), t.get("date", ""), t.get("phone", "بدون"),
                 t.get("type", ""), t.get("item_name", "-"), t.get("quantity", "-"),
-                t.get("price", t.get("amount", 0)), t.get("profit", 0)
+                t.get("price", t.get("amount", 0))
             ])
         if summary_data:
             ws2 = wb.create_sheet(title="ملخص أرباح العملاء")
-            ws2.append(["رقم الهاتف", "إجمالي المشتريات", "إجمالي المربح الصافي"])
+            ws2.append(["رقم الهاتف", "إجمالي المشتريات"])
             for phone, totals in summary_data.items():
-                ws2.append([phone, totals["spent"], totals["profit"]])
+                ws2.append([phone, totals["spent"]])
         file_name = "Comprehensive_Report.xlsx"
     elif report_type == "single":
         ws1.title = "تقرير العميل"
-        ws1.append(["رقم الفاتورة", "التاريخ", "نوع العملية", "البيان", "الكمية", "المبلغ", "المربح"])
+        ws1.append(["رقم الفاتورة", "التاريخ", "نوع العملية", "البيان", "الكمية", "المبلغ"])
         total_spent = 0
-        total_profit = 0
         for t in history_data:
             price_or_amount = t.get("price", t.get("amount", 0))
-            profit = t.get("profit", 0)
             ws1.append([
                 t.get("order_id", "-"), t.get("date", ""), t.get("type", ""), 
-                t.get("item_name", "-"), t.get("quantity", "-"), price_or_amount, profit
+                t.get("item_name", "-"), t.get("quantity", "-"), price_or_amount
             ])
             if t.get("type") == "شراء":
                 total_spent += price_or_amount
-                total_profit += profit
         ws1.append([]) 
-        ws1.append(["", "", "", "", "الإجمالي النهائي:", total_spent, total_profit])
+        ws1.append(["", "", "", "", "إجمالي المشتريات:", total_spent])
         file_name = "Customer_Report.xlsx"
 
     file_stream = io.BytesIO()
@@ -152,6 +207,43 @@ def generate_admin_report_excel(report_type, history_data, summary_data=None):
     file_stream.seek(0)
     file_stream.name = file_name
     return file_stream
+
+def filter_and_insert_codes(chat_id, extracted_data, product_info=None):
+    """دالة لفحص الأكواد المكررة وتخطيها وإدخال الأكواد السليمة"""
+    if not extracted_data:
+        return bot.send_message(chat_id, "❌ لم يتم العثور على بيانات صالحة للاستيراد.")
+        
+    bot.send_message(chat_id, "🔍 جاري فحص الأكواد للتأكد من عدم وجود تكرار...")
+    
+    codes_to_check = [str(d['code']).strip() for d in extracted_data]
+    existing_docs = stock.find({"code": {"$in": codes_to_check}})
+    existing_set = set([str(doc['code']).strip() for doc in existing_docs])
+    
+    valid_docs = []
+    duplicate_codes = []
+    seen_in_this_batch = set()
+    
+    for d in extracted_data:
+        c = str(d['code']).strip()
+        # إذا كان الكود موجود مسبقاً أو مكرر في نفس الملف
+        if c in existing_set or c in seen_in_this_batch:
+            duplicate_codes.append(c)
+        else:
+            seen_in_this_batch.add(c)
+            if product_info: d.update(product_info)
+            d["sold"] = False
+            valid_docs.append(d)
+            
+    if valid_docs:
+        stock.insert_many(valid_docs)
+        
+    res_msg = f"✅ تم إضافة {len(valid_docs)} كود بنجاح."
+    if duplicate_codes:
+        res_msg += f"\n\n⚠️ **تنبيه:** تم تجاهل {len(duplicate_codes)} كود مكرر (موجود مسبقاً في المتجر أو مكرر في الإدخال)."
+        dups_unique = list(set(duplicate_codes))
+        res_msg += f"\n\nأمثلة للأكواد المكررة:\n" + "\n".join(dups_unique[:5])
+        
+    bot.send_message(chat_id, res_msg)
 
 # ========= MENUS =========
 def menu():
@@ -178,7 +270,7 @@ def admin_menu():
 @bot.message_handler(commands=['FRP', 'frp'])
 def frp_cmd(msg):
     if msg.chat.id not in ADMIN_IDS: return bot.send_message(msg.chat.id, "❌ هذه الصلاحية للمدير الأساسي فقط.")
-    bot.send_message(msg.chat.id, "⚠️ **تحذير خطير جداً** ⚠️\n\nأنت على وشك عمل فورمات (Factory Reset) كامل للمتجر (حذف جميع العملاء، الأرصدة، المنتجات، الفواتير، والأكواد).\n\nللتأكيد، أرسل الجملة التالية تماماً:\n`تأكيد الحذف النهائي`", parse_mode="Markdown")
+    bot.send_message(msg.chat.id, "⚠️ **تحذير خطير جداً** ⚠️\n\nأنت على وشك عمل فورمات كامل للمتجر.\nللتأكيد، أرسل:\n`تأكيد الحذف النهائي`", parse_mode="Markdown")
     bot.register_next_step_handler(msg, process_frp)
 
 def process_frp(msg):
@@ -189,9 +281,8 @@ def process_frp(msg):
         transactions.delete_many({})
         counters.delete_many({})
         admins_db.delete_many({})
-        bot.send_message(msg.chat.id, "✅ تم عمل فورمات للمتجر بنجاح. المتجر الآن نظيف وجديد بالكامل.")
-    else:
-        bot.send_message(msg.chat.id, "❌ تم إلغاء عملية الفورمات لحماية البيانات.")
+        bot.send_message(msg.chat.id, "✅ تم عمل فورمات للمتجر بنجاح.")
+    else: bot.send_message(msg.chat.id, "❌ تم إلغاء الفورمات.")
 
 @bot.message_handler(commands=['ADD', 'add'])
 def add_admin_cmd(msg):
@@ -204,15 +295,14 @@ def process_add_admin(msg):
     try:
         new_admin_id = int(msg.text.strip())
         admins_db.update_one({"_id": new_admin_id}, {"$set": {"added_by": msg.chat.id, "date": datetime.datetime.now()}}, upsert=True)
-        bot.send_message(msg.chat.id, f"✅ تم إضافة الأدمن الجديد `{new_admin_id}` بنجاح.", parse_mode="Markdown")
+        bot.send_message(msg.chat.id, f"✅ تم إضافة الأدمن `{new_admin_id}` بنجاح.", parse_mode="Markdown")
         bot.send_message(new_admin_id, "🎉 تمت ترقيتك لتصبح مشرفاً في المتجر!\nأرسل /admin لفتح لوحة التحكم.")
-    except:
-        bot.send_message(msg.chat.id, "❌ خطأ، يرجى إرسال أرقام فقط (ID).")
+    except: bot.send_message(msg.chat.id, "❌ خطأ، يرجى إرسال أرقام فقط (ID).")
 
 @bot.message_handler(commands=['Block', 'block'])
 def block_user_cmd(msg):
     if not is_admin(msg.chat.id): return
-    bot.send_message(msg.chat.id, "أرسل رقم هاتف العميل المراد حظره وطرده من النظام:")
+    bot.send_message(msg.chat.id, "أرسل رقم هاتف العميل المراد حظره:")
     bot.register_next_step_handler(msg, process_block_user)
 
 def process_block_user(msg):
@@ -239,10 +329,8 @@ def start(msg):
     if not u.get("phone"):
         bot.send_message(uid, "👋 مرحباً بك في المتجر!\n\nلإكمال التسجيل، يرجى مشاركة رقم هاتفك.", reply_markup=contact_menu())
     else:
-        if u.get("status") == "blocked":
-            bot.send_message(uid, "تم حظرك من قبل الادارة وللاستفسار تواصل معنا")
-        else:
-            bot.send_message(uid, "👋 مرحباً بك في المتجر", reply_markup=menu())
+        if u.get("status") == "blocked": bot.send_message(uid, "تم حظرك من قبل الادارة وللاستفسار تواصل معنا")
+        else: bot.send_message(uid, "👋 مرحباً بك في المتجر", reply_markup=menu())
 
 @bot.message_handler(content_types=['contact'])
 def handle_contact(msg):
@@ -255,8 +343,17 @@ def handle_contact(msg):
 
     users.update_one({"_id": uid}, {"$set": {"phone": phone}})
     u = users.find_one({"_id": uid})
+    
     if u.get("status") == "frozen":
-        bot.send_message(uid, f"✅ تم التسجيل بالرقم: {phone}\n\n⚠️ حسابك الآن (مجمد). برجاء التواصل مع الدعم الفني لتفعيل الحساب.", reply_markup=menu())
+        bot.send_message(uid, f"✅ تم التسجيل بالرقم: {phone}\n\n⚠️ حسابك الآن (قيد المراجعة). يرجى الانتظار حتى تقوم الإدارة بتفعيل حسابك.", reply_markup=menu())
+        
+        # إشعار الإدارة بالتسجيل الجديد مع أزرار التحكم
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(types.InlineKeyboardButton("✅ تفعيل", callback_data=f"activate_{uid}"),
+               types.InlineKeyboardButton("🚫 حظر", callback_data=f"block_{uid}"))
+        for admin_id in get_all_admins():
+            try: bot.send_message(admin_id, f"👤 **تسجيل مستخدم جديد ينتظر المراجعة!**\n\n🆔 ID: `{uid}`\n📱 الهاتف: `{phone}`\n\nيرجى مراجعة الحساب وتحديد حالته:", reply_markup=kb, parse_mode="Markdown")
+            except: pass
     else:
         bot.send_message(uid, f"✅ حسابك نشط وجاهز.", reply_markup=menu())
 
@@ -334,9 +431,15 @@ def check_card(msg):
             attempts_left = 5 - failed_attempts
             return bot.send_message(uid, f"❌ كود غير صالح. (متبقي لك {attempts_left} محاولات قبل تجميد الحساب)")
 
-    users.update_one({"_id": uid}, {"$inc": {"balance": float(card["value"])}, "$set": {"failed_attempts": 0}})
+    new_bal = u.get("balance", 0.0) + float(card["value"])
+    users.update_one({"_id": uid}, {"$set": {"balance": new_bal, "failed_attempts": 0}})
     transactions.insert_one({"uid": uid, "type": "شحن كارت", "amount": float(card["value"]), "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")})
     bot.send_message(uid, f"✅ تم شحن رصيدك بقيمة {card['value']} بنجاح")
+    
+    # إشعار الإدارة بعملية الشحن
+    for admin_id in get_all_admins():
+        try: bot.send_message(admin_id, f"💳 **عملية شحن جديدة!**\n\n👤 العميل: `{uid}`\n📱 الهاتف: `{u.get('phone')}`\n💰 قيمة الشحن: **{card['value']}**\n💵 الرصيد الجديد للعميل: **{new_bal}**", parse_mode="Markdown")
+        except: pass
 
 # ========= SHOP =========
 @bot.message_handler(func=lambda m: m.text == "🛒 شراء")
@@ -408,10 +511,7 @@ def process_purchase(msg, user, item_ref, available):
 
     name = item_ref['name']
     price = float(item_ref['price'])
-    cost = float(item_ref.get('cost', 0.0))
     total_price = qty * price
-    total_cost = qty * cost
-    profit = total_price - total_cost
 
     user_fresh = users.find_one({"_id": uid})
     if float(user_fresh.get("balance", 0.0)) < total_price: 
@@ -434,34 +534,33 @@ def process_purchase(msg, user, item_ref, available):
 
     transactions.insert_one({
         "order_id": order_id, "uid": uid, "phone": user_fresh.get('phone'), "type": "شراء", 
-        "item_name": name, "quantity": qty, "price": total_price, "cost": total_cost, "profit": profit, "date": dt_now
+        "item_name": name, "quantity": qty, "price": total_price, "date": dt_now
     })
 
     if SHEET_WEBHOOK_URL and SHEET_WEBHOOK_URL.startswith("http"):
         try:
             requests.post(SHEET_WEBHOOK_URL, json={
                 "order_id": order_id, "date": dt_now, "phone": user_fresh.get('phone'),
-                "item_name": f"{name} (x{qty})", "price": total_price, "cost": total_cost, "profit": profit
+                "item_name": f"{name} (x{qty})", "price": total_price
             }, timeout=3)
         except Exception as e: pass
 
-    bot.send_message(uid, f"✅ تم الشراء بنجاح!\n🧾 رقم الفاتورة: #{order_id}\n💰 إجمالي المخصوم: {total_price}\n\nجاري تجهيز الأكواد وإرسالها في ملفات إكسيل...", parse_mode="Markdown")
+    bot.send_message(uid, f"✅ تم الشراء بنجاح!\n🧾 رقم الفاتورة: #{order_id}\n💰 إجمالي المخصوم: {total_price}\n\nجاري تجهيز الفاتورة وملف الأكواد...", parse_mode="Markdown")
 
     for admin_id in get_all_admins():
-        try: bot.send_message(admin_id, f"🛒 شراء جديد بالجملة | فاتورة #{order_id}\n👤 العميل: `{uid}`\n📱 الهاتف: {user_fresh.get('phone')}\n📦 المنتج: {name} (الكمية: {qty})\n💰 المدفوع: {total_price}\n💵 المربح: {profit}", parse_mode="Markdown")
+        try: bot.send_message(admin_id, f"🛒 **شراء جديد بالجملة** | فاتورة #{order_id}\n👤 العميل: `{uid}`\n📱 الهاتف: {user_fresh.get('phone')}\n📦 المنتج: {name} (الكمية: {qty})\n💰 المدفوع: {total_price}", parse_mode="Markdown")
         except: pass
 
-    purchased_items_data = [{'code': d['code'], 'serial': d.get('serial', 'بدون_تسلسلي')} for d in available_docs]
-    chunks = [purchased_items_data[i:i + 10] for i in range(0, len(purchased_items_data), 10)]
+    purchased_items_data = [{'code': d['code'], 'serial': d.get('serial', 'بدون'), 'pin': d.get('pin', 'بدون')} for d in available_docs]
     
-    for i, chunk in enumerate(chunks):
-        file_stream = generate_excel_file(chunk, i)
-        bot.send_document(uid, document=file_stream, caption=f"📁 الأكواد (الدفعة {i+1} من {len(chunks)})")
-        for admin_id in get_all_admins():
-            try:
-                file_stream.seek(0)
-                bot.send_document(admin_id, document=file_stream, caption=f"📁 نسخة للإدارة | فاتورة #{order_id} | الدفعة {i+1}")
-            except: pass
+    file_stream = generate_customer_excel_file(purchased_items_data, order_id, dt_now, name)
+    bot.send_document(uid, document=file_stream, caption=f"📁 فاتورة الأكواد | رقم #{order_id}")
+    
+    for admin_id in get_all_admins():
+        try:
+            file_stream.seek(0)
+            bot.send_document(admin_id, document=file_stream, caption=f"📁 نسخة للإدارة | فاتورة #{order_id}")
+        except: pass
 
     remaining_stock = stock.count_documents({"name": name, "sold": False})
     if remaining_stock <= 30:
@@ -534,11 +633,10 @@ def execute_report(admin_id, rep_type, start_date, end_date):
         for t in history:
             phone = t.get("phone", "غير_مسجل")
             if t.get("type") == "شراء":
-                if phone not in summary: summary[phone] = {"spent": 0.0, "profit": 0.0}
+                if phone not in summary: summary[phone] = {"spent": 0.0}
                 summary[phone]["spent"] += float(t.get("price", 0))
-                summary[phone]["profit"] += float(t.get("profit", 0))
         file_stream = generate_admin_report_excel("all", history, summary)
-        bot.send_document(admin_id, document=file_stream, caption="✅ التقرير الشامل للعمليات والأرباح.")
+        bot.send_document(admin_id, document=file_stream, caption="✅ التقرير الشامل للعمليات.")
     elif rep_type == "single":
         msg = bot.send_message(admin_id, "👉 أرسل **رقم هاتف العميل** لاستخراج تقريره:")
         bot.register_next_step_handler(msg, process_single_report_excel_final, date_filter)
@@ -579,7 +677,7 @@ def show_stock_item_panel(msg):
     item = stock.find_one({"name": name, "sold": False})
     if not item: return bot.send_message(msg.chat.id, "❌ المنتج غير موجود.")
         
-    text = f"📦 المنتج: `{name}`\n💰 السعر الحالي: {item['price']}\n📉 التكلفة: {item.get('cost', 0)}\n📊 الكمية المتوفرة: {count}"
+    text = f"📦 المنتج: `{name}`\n💰 السعر الحالي: {item['price']}\n📊 الكمية المتوفرة: {count}"
     if msg.chat.id not in temp_admin_data: temp_admin_data[msg.chat.id] = {}
     temp_admin_data[msg.chat.id]["mng_item_name"] = name
     
@@ -713,7 +811,6 @@ def admin_customer_actions(call):
         try: bot.send_message(uid, "تم حظرك من قبل الادارة وللاستفسار تواصل معنا")
         except: pass
 
-    # تحديث واجهة بيانات العميل فوراً بعد التعديل
     u = users.find_one({"_id": uid})
     stat = u.get("status")
     
@@ -742,7 +839,7 @@ def admin_customer_actions(call):
 @bot.message_handler(func=lambda m: m.text == "➕ منتج")
 def add_product(msg):
     if not is_admin(msg.chat.id): return
-    text = "اختر طريقة إضافة المنتجات:\n\n📁 **الطريقة الأولى: القالب الشامل**\nحمل القالب، املأه بالمنتجات وأعد رفعه.\n\n✍️ **الطريقة الثانية: الإضافة اليدوية**\nأرسل:\n`القسم:الفئة:الاسم:السعر:التكلفة`"
+    text = "اختر طريقة إضافة المنتجات:\n\n📁 **الطريقة الأولى: القالب الشامل**\nحمل القالب، املأه بالمنتجات (ملاحظة: التسلسلي والـ PIN اختياريان) وأعد رفعه.\n\n✍️ **الطريقة الثانية: الإضافة اليدوية**\nأرسل:\n`القسم:الفئة:الاسم:السعر`"
     try:
         template = generate_products_template()
         bot.send_document(msg.chat.id, template, caption=text, parse_mode="Markdown")
@@ -760,7 +857,8 @@ def handle_add_product_choice(msg):
             file_stream = io.BytesIO(downloaded_file)
             wb = openpyxl.load_workbook(file_stream)
             ws = wb.active
-            docs, errors = [], 0
+            extracted_data, errors = [], 0
+            
             for i, row in enumerate(ws.iter_rows(values_only=True)):
                 if i == 0 or not any(row): continue 
                 try:
@@ -768,44 +866,50 @@ def handle_add_product_choice(msg):
                     sub = str(row[1]).strip() if row[1] else ""
                     name = str(row[2]).strip() if row[2] else ""
                     price = float(row[3]) if row[3] is not None else 0.0
-                    cost = float(row[4]) if row[4] is not None else 0.0
-                    code_val = str(row[5]).strip() if row[5] else ""
-                    serial_val = str(row[6]).strip() if len(row) > 6 and row[6] else "بدون_تسلسلي"
+                    code_val = str(row[4]).strip() if len(row) > 4 and row[4] else ""
+                    serial_val = str(row[5]).strip() if len(row) > 5 and row[5] else "بدون"
+                    pin_val = str(row[6]).strip() if len(row) > 6 and row[6] else "بدون"
+                    
                     if not all([cat, sub, name, code_val]):
                         errors += 1; continue
-                    docs.append({"category": cat, "subcategory": sub, "name": name, "price": price, "cost": cost, "code": code_val, "serial": serial_val, "sold": False})
+                    extracted_data.append({"category": cat, "subcategory": sub, "name": name, "price": price, "code": code_val, "serial": serial_val, "pin": pin_val})
                 except Exception: errors += 1; continue
-            if docs:
-                stock.insert_many(docs)
-                bot.send_message(msg.chat.id, f"✅ تم إضافة {len(docs)} كود." + (f"\n⚠️ تم تخطي {errors} صف للخطأ." if errors > 0 else ""))
-            else: bot.send_message(msg.chat.id, "❌ لم يتم استيراد أي بيانات.")
+                
+            if errors > 0:
+                bot.send_message(msg.chat.id, f"⚠️ تم تخطي {errors} صف لوجود بيانات ناقصة أو غير صحيحة.")
+            filter_and_insert_codes(msg.chat.id, extracted_data)
+            
         except Exception as e: bot.send_message(msg.chat.id, f"❌ خطأ:\n{e}")
     elif msg.text and ":" in msg.text: save_product_info(msg)
     else: bot.send_message(msg.chat.id, "❌ إدخال غير صالح.")
 
 def save_product_info(msg):
     try:
-        cat, sub, name, price, cost = msg.text.split(":")
+        cat, sub, name, price = msg.text.split(":")
         if msg.chat.id not in temp_admin_data: temp_admin_data[msg.chat.id] = {}
-        temp_admin_data[msg.chat.id]["new_product"] = {"cat": cat.strip(), "sub": sub.strip(), "name": name.strip(), "price": float(price.strip()), "cost": float(cost.strip())}
-        bot.send_message(msg.chat.id, "✅ تم حفظ بيانات المنتج.\nالآن أرسل الأكواد كـ **رسالة نصية** (الكود:التسلسلي).")
+        temp_admin_data[msg.chat.id]["new_product"] = {"cat": cat.strip(), "sub": sub.strip(), "name": name.strip(), "price": float(price.strip())}
+        bot.send_message(msg.chat.id, "✅ تم حفظ بيانات المنتج.\nالآن أرسل الأكواد كـ **رسالة نصية** بالتنسيق التالي:\n`الكود:التسلسلي:PIN`\n\n*(ملاحظة: يمكنك إرسال الكود فقط وسيعتبر البوت أن الباقي غير متوفر)*")
         bot.register_next_step_handler(msg, process_product_codes_manual)
-    except: bot.send_message(msg.chat.id, "❌ خطأ في التنسيق.")
+    except: bot.send_message(msg.chat.id, "❌ خطأ في التنسيق. تأكد من وجود 4 عناصر مفصولة بـ (:)")
 
 def process_product_codes_manual(msg):
     if msg.text and msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
-    data = temp_admin_data.get(msg.chat.id, {}).get("new_product")
-    if not data: return bot.send_message(msg.chat.id, "❌ حدث خطأ.")
-    codes = []
+    product_info = temp_admin_data.get(msg.chat.id, {}).get("new_product")
+    if not product_info: return bot.send_message(msg.chat.id, "❌ حدث خطأ.")
+    
+    extracted_data = []
     if msg.text:
         for line in msg.text.split("\n"):
             if line.strip():
                 parts = line.split(":")
-                codes.append({"code": parts[0].strip(), "serial": parts[1].strip() if len(parts) > 1 else "بدون_تسلسلي"})
-    if not codes: return bot.send_message(msg.chat.id, "❌ لم يتم العثور على أكواد.")
-    docs = [{"category": data['cat'], "subcategory": data['sub'], "name": data['name'], "price": data['price'], "cost": data['cost'], "code": c['code'], "serial": c['serial'], "sold": False} for c in codes]
-    stock.insert_many(docs)
-    bot.send_message(msg.chat.id, f"✅ تم إضافة {len(docs)} كود لـ [{data['name']}].")
+                c_val = parts[0].strip()
+                s_val = parts[1].strip() if len(parts) > 1 else "بدون"
+                p_val = parts[2].strip() if len(parts) > 2 else "بدون"
+                extracted_data.append({"code": c_val, "serial": s_val, "pin": p_val})
+                
+    filter_and_insert_codes(msg.chat.id, extracted_data, product_info)
+    if msg.chat.id in temp_admin_data and "new_product" in temp_admin_data[msg.chat.id]:
+        del temp_admin_data[msg.chat.id]["new_product"]
 
 # ===== SET BALANCE =====
 @bot.message_handler(func=lambda m: m.text == "💰 ضبط الرصيد")
