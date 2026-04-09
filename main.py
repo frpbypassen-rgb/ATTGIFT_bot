@@ -38,7 +38,7 @@ counters = db["counters"]
 MENU_BUTTONS = [
     "🛒 شراء", "💳 شحن", "👤 حسابي", "👥 المستخدمين", 
     "🎫 توليد", "➕ منتج", "💳 شحن يدوي", "⚙️ إدارة عميل", 
-    "💰 ضبط الرصيد", "🧾 سجل الفواتير", "📦 إدارة المخزون", "🏪 العودة للمتجر"
+    "💰 ضبط الرصيد", "🧾 سجل الفواتير", "📦 إدارة المخزون", "📊 تقارير إكسيل", "🏪 العودة للمتجر"
 ]
 
 temp_admin_data = {}
@@ -61,7 +61,7 @@ def admin_menu():
     kb.add("🎫 توليد", "💳 شحن يدوي")
     kb.add("💰 ضبط الرصيد", "➕ منتج")
     kb.add("📦 إدارة المخزون", "🧾 سجل الفواتير") 
-    kb.add("🏪 العودة للمتجر") 
+    kb.add("📊 تقارير إكسيل", "🏪 العودة للمتجر") 
     return kb
 
 # ========= HELPER FUNCTIONS =========
@@ -110,7 +110,6 @@ def generate_excel_file(items_data, index):
     return file_stream
 
 def generate_products_template():
-    """توليد قالب إكسيل فارغ جاهز لملء المنتجات"""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Products_Template"
@@ -121,6 +120,56 @@ def generate_products_template():
     wb.save(file_stream)
     file_stream.seek(0)
     file_stream.name = "Template_Products.xlsx"
+    return file_stream
+
+def generate_admin_report_excel(report_type, history_data, summary_data=None):
+    """دالة لإنشاء تقارير الإكسيل للإدارة (شامل أو فردي)"""
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    
+    if report_type == "all":
+        ws1.title = "سجل العمليات"
+        ws1.append(["رقم الفاتورة", "التاريخ", "الهاتف", "نوع العملية", "البيان", "الكمية", "المبلغ", "المربح"])
+        for t in history_data:
+            price_or_amount = t.get("price", t.get("amount", 0))
+            ws1.append([
+                t.get("order_id", "-"), t.get("date", ""), t.get("phone", "بدون"),
+                t.get("type", ""), t.get("item_name", "-"), t.get("quantity", "-"),
+                price_or_amount, t.get("profit", 0)
+            ])
+            
+        if summary_data:
+            ws2 = wb.create_sheet(title="ملخص أرباح العملاء")
+            ws2.append(["رقم الهاتف", "إجمالي المشتريات", "إجمالي المربح الصافي"])
+            for phone, totals in summary_data.items():
+                ws2.append([phone, totals["spent"], totals["profit"]])
+                
+        file_name = "Comprehensive_Report.xlsx"
+        
+    elif report_type == "single":
+        ws1.title = "تقرير العميل"
+        ws1.append(["رقم الفاتورة", "التاريخ", "نوع العملية", "البيان", "الكمية", "المبلغ", "المربح"])
+        total_spent = 0
+        total_profit = 0
+        for t in history_data:
+            price_or_amount = t.get("price", t.get("amount", 0))
+            profit = t.get("profit", 0)
+            ws1.append([
+                t.get("order_id", "-"), t.get("date", ""), t.get("type", ""), 
+                t.get("item_name", "-"), t.get("quantity", "-"), price_or_amount, profit
+            ])
+            if t.get("type") == "شراء":
+                total_spent += price_or_amount
+                total_profit += profit
+        
+        ws1.append([]) # سطر فارغ
+        ws1.append(["", "", "", "", "الإجمالي النهائي:", total_spent, total_profit])
+        file_name = "Customer_Report.xlsx"
+
+    file_stream = io.BytesIO()
+    wb.save(file_stream)
+    file_stream.seek(0)
+    file_stream.name = file_name
     return file_stream
 
 # ========= START & CONTACT HANDLER =========
@@ -376,6 +425,67 @@ def admin(msg):
 def back_to_store(msg):
     if msg.chat.id not in ADMIN_IDS: return
     bot.send_message(msg.chat.id, "🔄 تم تحويلك لوضع العميل", reply_markup=menu())
+
+# ===== EXCEL REPORTS (NEW) =====
+@bot.message_handler(func=lambda m: m.text == "📊 تقارير إكسيل")
+def excel_reports_cmd(msg):
+    if msg.chat.id not in ADMIN_IDS: return
+    
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("📄 تقرير شامل (كل العملاء والعمليات)", callback_data="rep_all"))
+    kb.add(types.InlineKeyboardButton("👤 تقرير عميل محدد", callback_data="rep_single"))
+    
+    bot.send_message(msg.chat.id, "📊 اختر نوع التقرير الذي تريد استخراجه:", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("rep_"))
+def handle_report_callback(call):
+    admin_id = call.message.chat.id
+    action = call.data.split("_")[1]
+    
+    if action == "all":
+        bot.send_message(admin_id, "⏳ جاري تجميع البيانات وتجهيز ملف الإكسيل الشامل...")
+        history = list(transactions.find().sort("_id", -1))
+        
+        if not history:
+            return bot.answer_callback_query(call.id, "❌ لا توجد عمليات مسجلة في المتجر حتى الآن.", show_alert=True)
+            
+        summary = {}
+        for t in history:
+            phone = t.get("phone", "غير_مسجل")
+            if t.get("type") == "شراء":
+                if phone not in summary:
+                    summary[phone] = {"spent": 0.0, "profit": 0.0}
+                summary[phone]["spent"] += float(t.get("price", 0))
+                summary[phone]["profit"] += float(t.get("profit", 0))
+        
+        file_stream = generate_admin_report_excel("all", history, summary)
+        bot.send_document(admin_id, document=file_stream, caption="✅ التقرير الشامل لجميع العمليات وأرباح العملاء.")
+        bot.answer_callback_query(call.id)
+        
+    elif action == "single":
+        msg = bot.send_message(admin_id, "👉 أرسل **رقم هاتف العميل** لاستخراج تقريره:")
+        bot.register_next_step_handler(msg, process_single_report_excel)
+        bot.answer_callback_query(call.id)
+
+def process_single_report_excel(msg):
+    if msg.text in MENU_BUTTONS: return bot.send_message(msg.chat.id, "تم الإلغاء.")
+    
+    u = find_customer(msg.text)
+    if not u:
+        return bot.send_message(msg.chat.id, "❌ لم يتم العثور على العميل بهذا الرقم.")
+        
+    uid = u["_id"]
+    phone = u.get("phone", "بدون_رقم")
+    
+    bot.send_message(msg.chat.id, "⏳ جاري استخراج تقرير العميل...")
+    history = list(transactions.find({"uid": uid}).sort("_id", -1))
+    
+    if not history:
+        return bot.send_message(msg.chat.id, "❌ لا توجد أي عمليات مسجلة لهذا العميل حتى الآن.")
+        
+    file_stream = generate_admin_report_excel("single", history)
+    file_stream.name = f"Report_{phone}.xlsx"
+    bot.send_document(msg.chat.id, document=file_stream, caption=f"✅ تقرير العمليات الخاص بالعميل: {phone}")
 
 # ===== MANAGE STOCK =====
 @bot.message_handler(func=lambda m: m.text == "📦 إدارة المخزون")
