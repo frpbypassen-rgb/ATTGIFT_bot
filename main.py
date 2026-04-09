@@ -12,7 +12,7 @@ import threading
 import time
 import requests 
 import io
-import openpyxl # مكتبة الإكسيل الجديدة
+import openpyxl 
 
 # ========= CONFIG =========
 API_TOKEN = "8769145956:AAEKIAKJ2sGn9HFu_-M8diyND1J754fp_Wc"
@@ -38,7 +38,6 @@ MENU_BUTTONS = [
     "💰 ضبط الرصيد", "🧾 سجل الفواتير", "🏪 العودة للمتجر"
 ]
 
-# متغير مؤقت لحفظ بيانات المنتج قبل رفع ملف الإكسيل من الأدمن
 temp_admin_data = {}
 
 # ========= MENUS =========
@@ -92,14 +91,17 @@ def get_next_order_id():
     )
     return doc["seq"]
 
-def generate_excel_file(codes, index):
-    """دالة لإنشاء ملف إكسيل في الذاكرة للأكواد"""
+def generate_excel_file(items_data, index):
+    """دالة لإنشاء ملف إكسيل يحتوي على الأكواد والأرقام التسلسلية"""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Codes"
-    ws.append(["الكود"]) # عنوان العمود
-    for c in codes:
-        ws.append([c])
+    # إضافة العناوين
+    ws.append(["الكود", "الرقم التسلسلي"])
+    
+    # إضافة البيانات
+    for data in items_data:
+        ws.append([data['code'], data['serial']])
     
     file_stream = io.BytesIO()
     wb.save(file_stream)
@@ -168,7 +170,7 @@ def client_reports(call):
         report_text = "🛒 **آخر 10 مشتريات:**\n\n"
         for t in history:
             order_id = t.get('order_id', 'N/A')
-            report_text += f"▪️ {t['date']} | فاتورة #{order_id} | {t['item_name']} | السعر: {t['price']}\n"
+            report_text += f"▪️ {t['date']} | فاتورة #{order_id} | {t['item_name']} (x{t.get('quantity', 1)}) | السعر: {t['price']}\n"
             
     elif call.data == "client_statement":
         history = list(transactions.find({"uid": uid}).sort("_id", -1).limit(20))
@@ -183,7 +185,7 @@ def client_reports(call):
     bot.send_message(uid, report_text, parse_mode="Markdown")
     bot.answer_callback_query(call.id)
 
-# ========= CHARGE (WITH ANTI-SPAM) =========
+# ========= CHARGE =========
 @bot.message_handler(func=lambda m: m.text == "💳 شحن")
 def charge(msg):
     if not check_user_access(msg.chat.id): return
@@ -237,15 +239,17 @@ def cat(call):
 def sub(call):
     _, cat_name, sub_name = call.data.split("_",2)
     items = list(stock.find({"category": cat_name, "subcategory": sub_name, "sold": False}))
-    if not items: return bot.answer_callback_query(call.id, "❌ نفذت الكمية")
-    item = items[0]
     available_count = len(items)
     
+    if available_count < 10:
+        return bot.answer_callback_query(call.id, "❌ الكمية المتوفرة أقل من الحد الأدنى للشراء (10 أكواد).", show_alert=True)
+        
+    item = items[0]
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("🛒 طلب شراء", callback_data=f"buy_{item['_id']}"))
-    bot.send_message(call.message.chat.id, f"📦 المنتج: {item['name']}\n💰 السعر: {item['price']}\n📊 المتوفر: {available_count}", reply_markup=kb)
+    bot.send_message(call.message.chat.id, f"📦 المنتج: {item['name']}\n💰 السعر: {item['price']}\n📊 المتوفر: {available_count}\n⚠️ أقل كمية للطلب: 10 ومضاعفاتها", reply_markup=kb)
 
-# ========= BUY (BULK WITH EXCEL) =========
+# ========= BUY (BULK WITH MINIMUM 10) =========
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
 def buy_quantity_prompt(call):
     uid = call.message.chat.id
@@ -260,10 +264,10 @@ def buy_quantity_prompt(call):
     product_name = item_preview['name']
     available = stock.count_documents({"name": product_name, "sold": False})
     
-    if available == 0:
-        return bot.answer_callback_query(call.id, "❌ نفذت الكمية.", show_alert=True)
+    if available < 10:
+        return bot.answer_callback_query(call.id, "❌ الكمية المتبقية أقل من 10.", show_alert=True)
 
-    msg = bot.send_message(uid, f"📦 المنتج: {product_name}\n📊 المتوفر: {available}\n\n👉 أرسل **الكمية المطلوبة** كأرقام فقط:")
+    msg = bot.send_message(uid, f"📦 المنتج: {product_name}\n📊 المتوفر: {available}\n\n👉 أرسل **الكمية المطلوبة** (يجب أن تكون 10 أو مضاعفاتها كـ 20، 30...):")
     bot.register_next_step_handler(msg, process_purchase, user, item_preview, available)
     bot.answer_callback_query(call.id)
 
@@ -273,9 +277,10 @@ def process_purchase(msg, user, item_ref, available):
     
     try:
         qty = int(msg.text.strip())
-        if qty <= 0: raise ValueError
+        if qty < 10 or qty % 10 != 0:
+            return bot.send_message(uid, "❌ الكمية يجب أن تكون 10 أو مضاعفاتها (10, 20, 30...). تم الإلغاء.")
     except ValueError:
-        return bot.send_message(uid, "❌ الكمية يجب أن تكون رقماً صحيحاً أكبر من صفر. تم الإلغاء.")
+        return bot.send_message(uid, "❌ الرجاء إدخال رقم صحيح. تم الإلغاء.")
 
     if qty > available:
         return bot.send_message(uid, f"❌ الكمية المطلوبة غير متوفرة. أقصى كمية: {available}")
@@ -287,12 +292,10 @@ def process_purchase(msg, user, item_ref, available):
     total_cost = qty * cost
     profit = total_price - total_cost
 
-    # جلب معلومات المستخدم محدثة للتأكد من الرصيد
     user_fresh = users.find_one({"_id": uid})
     if user_fresh.get("balance", 0) < total_price: 
         return bot.send_message(uid, f"❌ رصيدك غير كافي.\nالمطلوب: {total_price}\nرصيدك: {user_fresh.get('balance', 0)}")
 
-    # حجز الأكواد بشكل آمن لمنع التضارب
     available_docs = list(stock.find({"name": name, "sold": False}).limit(qty))
     if len(available_docs) < qty:
         return bot.send_message(uid, "❌ حدث خطأ، الكمية نفذت فجأة. يرجى المحاولة مرة أخرى.")
@@ -301,22 +304,18 @@ def process_purchase(msg, user, item_ref, available):
     res = stock.update_many({"_id": {"$in": doc_ids}, "sold": False}, {"$set": {"sold": True}})
     
     if res.modified_count != qty:
-        # إلغاء الحجز لو حدث خطأ بالتزامن
         stock.update_many({"_id": {"$in": doc_ids}}, {"$set": {"sold": False}})
         return bot.send_message(uid, "❌ حدث تضارب أثناء الشراء، الرجاء المحاولة مرة أخرى.")
 
-    # خصم الرصيد
     users.update_one({"_id": uid}, {"$inc": {"balance": -total_price}})
     order_id = get_next_order_id()
     dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # تسجيل الفاتورة
     transactions.insert_one({
         "order_id": order_id, "uid": uid, "phone": user_fresh.get('phone'), "type": "شراء", 
         "item_name": name, "quantity": qty, "price": total_price, "cost": total_cost, "profit": profit, "date": dt_now
     })
 
-    # الإرسال لجوجل شيت
     if SHEET_WEBHOOK_URL and SHEET_WEBHOOK_URL.startswith("http"):
         try:
             requests.post(SHEET_WEBHOOK_URL, json={
@@ -326,11 +325,11 @@ def process_purchase(msg, user, item_ref, available):
         except Exception as e:
             print("Sheet Error:", e)
 
-    bot.send_message(uid, f"✅ تم شراء {qty} من [{name}] بنجاح!\n🧾 رقم الفاتورة: #{order_id}\n💰 إجمالي المخصوم: {total_price}\n\nجاري تجهيز الأكواد...")
+    bot.send_message(uid, f"✅ تم الشراء بنجاح!\n🧾 رقم الفاتورة: #{order_id}\n💰 إجمالي المخصوم: {total_price}\n\nجاري تجهيز الأكواد وإرسالها في ملفات إكسيل...", parse_mode="Markdown")
 
-    # تقسيم الأكواد إلى ملفات إكسيل (10 أكواد في كل ملف)
-    purchased_codes = [d['code'] for d in available_docs]
-    chunks = [purchased_codes[i:i + 10] for i in range(0, len(purchased_codes), 10)]
+    # تقسيم الأكواد والسيريالات إلى ملفات إكسيل (10 أكواد في كل ملف)
+    purchased_items_data = [{'code': d['code'], 'serial': d.get('serial', 'بدون_تسلسلي')} for d in available_docs]
+    chunks = [purchased_items_data[i:i + 10] for i in range(0, len(purchased_items_data), 10)]
     
     for i, chunk in enumerate(chunks):
         file_stream = generate_excel_file(chunk, i)
@@ -420,7 +419,7 @@ def admin_customer_actions(call):
             else: report_text += f"▪️ {t['date']} | 💳 {t['type']} | بـ {t['amount']}\n"
         bot.send_message(call.message.chat.id, report_text, parse_mode="Markdown")
 
-# ===== ADD PRODUCT (TEXT OR EXCEL) =====
+# ===== ADD PRODUCT (TEXT OR EXCEL WITH SERIAL) =====
 @bot.message_handler(func=lambda m: m.text == "➕ منتج")
 def add_product(msg):
     if msg.chat.id != ADMIN_ID: return
@@ -438,7 +437,7 @@ def save_product_info(msg):
         
         bot.send_message(
             msg.chat.id, 
-            "✅ تم حفظ البيانات.\n\nالآن أرسل الأكواد إما كـ **رسالة نصية** (كل كود في سطر) أو قم برفع **ملف إكسيل (.xlsx)** يحتوي على الأكواد في العمود الأول (A)."
+            "✅ تم حفظ البيانات.\n\nالآن قم برفع **ملف إكسيل (.xlsx)** يحتوي على:\n- العمود (A): الكود\n- العمود (B): الرقم التسلسلي (اختياري)\n\nأو كـ **رسالة نصية** (الكود:التسلسلي في كل سطر)."
         )
         bot.register_next_step_handler(msg, process_product_codes)
     except Exception as e:
@@ -456,7 +455,7 @@ def process_product_codes(msg):
         if not msg.document.file_name.endswith('.xlsx'):
             return bot.send_message(msg.chat.id, "❌ يرجى رفع ملف بصيغة .xlsx فقط.")
         
-        bot.send_message(msg.chat.id, "⏳ جاري قراءة ملف الإكسيل...")
+        bot.send_message(msg.chat.id, "⏳ جاري قراءة ملف الإكسيل واستخراج الأكواد والأرقام التسلسلية...")
         try:
             file_info = bot.get_file(msg.document.file_id)
             downloaded_file = bot.download_file(file_info.file_path)
@@ -465,13 +464,21 @@ def process_product_codes(msg):
             wb = openpyxl.load_workbook(file_stream)
             ws = wb.active
             for row in ws.iter_rows(values_only=True):
-                if row and row[0]: # إذا كان العمود الأول A غير فارغ
-                    codes.append(str(row[0]).strip())
+                if row and row[0]: # إذا كان العمود A غير فارغ
+                    code_val = str(row[0]).strip()
+                    # استخراج التسلسلي من العمود B إن وجد
+                    serial_val = str(row[1]).strip() if len(row) > 1 and row[1] else "بدون_تسلسلي"
+                    codes.append({"code": code_val, "serial": serial_val})
         except Exception as e:
             return bot.send_message(msg.chat.id, f"❌ حدث خطأ أثناء قراءة الملف:\n{e}")
             
     elif msg.text:
-        codes = [c.strip() for c in msg.text.split("\n") if c.strip()]
+        for line in msg.text.split("\n"):
+            if line.strip():
+                parts = line.split(":")
+                code_val = parts[0].strip()
+                serial_val = parts[1].strip() if len(parts) > 1 else "بدون_تسلسلي"
+                codes.append({"code": code_val, "serial": serial_val})
         
     if not codes:
         return bot.send_message(msg.chat.id, "❌ لم يتم العثور على أكواد.")
@@ -480,12 +487,12 @@ def process_product_codes(msg):
     for c in codes:
         docs.append({
             "category": data['cat'], "subcategory": data['sub'], "name": data['name'],
-            "price": data['price'], "cost": data['cost'], "code": c, "sold": False
+            "price": data['price'], "cost": data['cost'], 
+            "code": c['code'], "serial": c['serial'], "sold": False
         })
         
     stock.insert_many(docs)
-    bot.send_message(msg.chat.id, f"✅ تم إضافة {len(docs)} كود بنجاح للمنتج [{data['name']}].\nالسعر: {data['price']} | التكلفة: {data['cost']}")
-    # تنظيف الذاكرة
+    bot.send_message(msg.chat.id, f"✅ تم إضافة {len(docs)} كود (مع الأرقام التسلسلية) بنجاح للمنتج [{data['name']}].\nالسعر: {data['price']} | التكلفة: {data['cost']}")
     del temp_admin_data[msg.chat.id]
 
 # ===== SET BALANCE =====
