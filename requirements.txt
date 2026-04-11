@@ -1,6 +1,7 @@
 pyTelegramBotAPI
 pymongo
 certifi
-Flask
-requests
+flask
 openpyxl
+requests
+gunicorn
