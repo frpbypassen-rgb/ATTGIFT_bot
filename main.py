@@ -47,6 +47,11 @@ MENU_BUTTONS = [
 temp_admin_data = {}
 
 # ========= HELPER FUNCTIONS =========
+def safe_str(text):
+    """دالة لتنظيف النصوص من رموز الماركدوان التي تسبب أخطاء في تيليجرام"""
+    if not text: return "بدون"
+    return str(text).replace("_", " ").replace("*", "").replace("`", "").replace("[", "").replace("]", "")
+
 def is_admin(uid):
     if uid in ADMIN_IDS:
         return True
@@ -474,7 +479,7 @@ def start(msg):
         m = bot.send_message(uid, "👋 مرحباً بك في المتجر!\n\nللبدء، يرجى كتابة **اسمك** (أو اسم محلك):", parse_mode="Markdown")
         bot.register_next_step_handler(m, process_name)
     elif not u.get("phone"):
-        bot.send_message(uid, f"أهلاً بك يا {u.get('name')}! يرجى مشاركة رقم هاتفك لاستكمال التسجيل بالضغط على الزر أدناه.", reply_markup=contact_menu())
+        bot.send_message(uid, f"أهلاً بك يا {safe_str(u.get('name'))}! يرجى مشاركة رقم هاتفك لاستكمال التسجيل بالضغط على الزر أدناه.", reply_markup=contact_menu())
     else:
         if u.get("status") == "blocked":
             bot.send_message(uid, "تم حظرك من قبل الادارة وللاستفسار تواصل معنا")
@@ -493,7 +498,7 @@ def process_name(msg):
     users.update_one({"_id": msg.chat.id}, {"$set": {"name": name}})
     bot.send_message(
         msg.chat.id, 
-        f"تشرفنا بك يا {name}!\nالآن يرجى مشاركة رقم هاتفك بالضغط على الزر أدناه 📱", 
+        f"تشرفنا بك يا {safe_str(name)}!\nالآن يرجى مشاركة رقم هاتفك بالضغط على الزر أدناه 📱", 
         reply_markup=contact_menu()
     )
 
@@ -510,12 +515,12 @@ def handle_contact(msg):
 
     users.update_one({"_id": uid}, {"$set": {"phone": phone, "tier": 1}})
     u = users.find_one({"_id": uid})
-    name = u.get("name", "غير مسجل")
+    safe_name = safe_str(u.get("name"))
     
     if u.get("status") == "frozen":
         bot.send_message(
             uid, 
-            f"✅ تم التسجيل بنجاح يا {name}.\n\n⚠️ حسابك الآن (قيد المراجعة). يرجى الانتظار حتى تقوم الإدارة بتفعيل حسابك.", 
+            f"✅ تم التسجيل بنجاح يا {safe_name}.\n\n⚠️ حسابك الآن (قيد المراجعة). يرجى الانتظار حتى تقوم الإدارة بتفعيل حسابك.", 
             reply_markup=types.ReplyKeyboardRemove()
         )
         
@@ -528,7 +533,7 @@ def handle_contact(msg):
             try:
                 bot.send_message(
                     admin_id, 
-                    f"🆕 **تسجيل مستخدم جديد! (قيد المراجعة)**\n\n🆔 ID: `{uid}`\n📛 الاسم: {name}\n📱 الهاتف: `{phone}`\n\nيرجى مراجعة الحساب وتحديد حالته:", 
+                    f"🆕 **تسجيل مستخدم جديد! (قيد المراجعة)**\n\n🆔 ID: `{uid}`\n📛 الاسم: {safe_name}\n📱 الهاتف: `{phone}`\n\nيرجى مراجعة الحساب وتحديد حالته:", 
                     reply_markup=kb, 
                     parse_mode="Markdown"
                 )
@@ -561,7 +566,8 @@ def account(msg):
     else:
         tier_str = "مستوى 3 🥇"
     
-    text = f"👤 **بيانات حسابك**\n\n📛 الاسم: {u.get('name')}\n🆔 ID: `{msg.chat.id}`\n📱 الهاتف: `{u.get('phone')}`\n💰 رصيدك: **{u.get('balance', 0.0)}**\n🎚️ تصنيف الحساب: {tier_str}\nحالة الحساب: {status_text}"
+    safe_name = safe_str(u.get('name'))
+    text = f"👤 **بيانات حسابك**\n\n📛 الاسم: {safe_name}\n🆔 ID: `{msg.chat.id}`\n📱 الهاتف: `{u.get('phone')}`\n💰 رصيدك: **{u.get('balance', 0.0)}**\n🎚️ تصنيف الحساب: {tier_str}\nحالة الحساب: {status_text}"
     
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -655,11 +661,12 @@ def check_card(msg):
     
     bot.send_message(uid, f"✅ تم شحن رصيدك بقيمة {card['value']} بنجاح")
     
+    safe_name = safe_str(u.get('name'))
     for admin_id in get_all_admins():
         try:
             bot.send_message(
                 admin_id, 
-                f"💳 **عملية شحن كارت!**\n\n📛 العميل: {u.get('name')}\n📱 الهاتف: `{u.get('phone')}`\n💰 قيمة الشحن: **{card['value']}**\n💵 الرصيد الجديد: **{new_bal}**", 
+                f"💳 **عملية شحن كارت!**\n\n📛 العميل: {safe_name}\n📱 الهاتف: `{u.get('phone')}`\n💰 قيمة الشحن: **{card['value']}**\n💵 الرصيد الجديد: **{new_bal}**", 
                 parse_mode="Markdown"
             )
         except Exception:
@@ -953,11 +960,12 @@ def process_purchase(msg, user, item_ref, available):
         parse_mode="Markdown"
     )
 
+    safe_name = safe_str(user_fresh.get('name'))
     for admin_id in get_all_admins():
         try:
             bot.send_message(
                 admin_id, 
-                f"🛒 **شراء جديد بالجملة** | فاتورة #{order_id}\n📛 العميل: {user_fresh.get('name')}\n📱 الهاتف: {user_fresh.get('phone')}\n🎚️ مستوى العميل: {tier}\n📦 المنتج: {name} (الكمية: {qty})\n💰 المدفوع: {total_price}", 
+                f"🛒 **شراء جديد بالجملة** | فاتورة #{order_id}\n📛 العميل: {safe_name}\n📱 الهاتف: {user_fresh.get('phone')}\n🎚️ مستوى العميل: {tier}\n📦 المنتج: {name} (الكمية: {qty})\n💰 المدفوع: {total_price}", 
                 parse_mode="Markdown"
             )
         except Exception:
@@ -1033,7 +1041,7 @@ def render_customer_panel(uid, chat_id, message_id=None):
         return
         
     stat = u.get("status")
-    name = u.get("name", "غير مسجل")
+    safe_name = safe_str(u.get("name"))
     tier = u.get("tier", 1)
     
     if tier == 1:
@@ -1050,7 +1058,7 @@ def render_customer_panel(uid, chat_id, message_id=None):
     else:
         stat_ar = "مجمد (قيد المراجعة) ❄️"
     
-    info = f"👤 بيانات العميل:\n📛 الاسم: {name}\nID: `{uid}`\nالهاتف: `{u.get('phone', 'بدون_رقم')}`\nالرصيد: {u.get('balance',0)}\n🎚️ مستوى الأسعار: {tier_str}\nالحالة: {stat_ar}"
+    info = f"👤 بيانات العميل:\n📛 الاسم: {safe_name}\nID: `{uid}`\nالهاتف: `{u.get('phone', 'بدون_رقم')}`\nالرصيد: {u.get('balance',0)}\n🎚️ مستوى الأسعار: {tier_str}\nالحالة: {stat_ar}"
     
     kb = types.InlineKeyboardMarkup(row_width=2)
     if stat == "active":
@@ -1480,6 +1488,44 @@ def delete_stock_qty(msg, name):
     except Exception:
         bot.send_message(msg.chat.id, "❌ خطأ، يرجى إرسال رقم صحيح.")
 
+# ===== USERS =====
+@bot.message_handler(func=lambda m: m.text == "👥 المستخدمين")
+def users_list(msg):
+    if not is_admin(msg.chat.id):
+        return
+        
+    try:
+        text = "👥 قائمة آخر 30 مستخدم:\n\n"
+        for u in users.find().sort("join", -1).limit(30):
+            stat = "✅" if u.get('status') == 'active' else ("🚫" if u.get('status') == 'blocked' else "❄️")
+            safe_name = safe_str(u.get('name'))
+            phone = str(u.get('phone', 'بدون رقم'))
+            bal = u.get('balance', 0)
+            
+            text += f"📛 {safe_name} | 📱 `{phone}` | الرصيد: {bal} | {stat}\n"
+            
+        bot.send_message(msg.chat.id, text, parse_mode="Markdown")
+    except Exception as e:
+        bot.send_message(msg.chat.id, f"❌ تعذر عرض القائمة بسبب خطأ:\n{e}")
+
+# ===== INVOICE LOG =====
+@bot.message_handler(func=lambda m: m.text == "🧾 سجل الفواتير")
+def invoices_log(msg):
+    if not is_admin(msg.chat.id):
+        return
+        
+    history = list(transactions.find({"type": "شراء", "order_id": {"$exists": True}}).sort("_id", -1).limit(40))
+    if not history:
+        bot.send_message(msg.chat.id, "لا توجد فواتير مبيعات حتى الآن.")
+        return
+        
+    text = "🧾 **سجل آخر 40 فاتورة:**\n\n"
+    for t in history:
+        safe_name = safe_str(t.get('user_name'))
+        text += f"▪️ #{t['order_id']} | 👤 {safe_name} | 🛒 {t['item_name']} (x{t.get('quantity', 1)}) | 💰 {t['price']}\n"
+        
+    bot.send_message(msg.chat.id, text, parse_mode="Markdown")
+
 # ===== EXCEL REPORTS & DATE FILTERING =====
 @bot.message_handler(func=lambda m: m.text == "📊 تقارير إكسيل")
 def excel_reports_cmd(msg):
@@ -1596,21 +1642,6 @@ def process_single_report_excel_final(msg, date_filter):
     file_stream = generate_admin_report_excel("single", history)
     file_stream.name = f"Report_{phone}.xlsx"
     bot.send_document(msg.chat.id, document=file_stream, caption=f"✅ تقرير العمليات الخاص بالعميل: {phone}")
-
-# ===== INVOICE LOG =====
-@bot.message_handler(func=lambda m: m.text == "🧾 سجل الفواتير")
-def invoices_log(msg):
-    if not is_admin(msg.chat.id):
-        return
-    history = list(transactions.find({"type": "شراء", "order_id": {"$exists": True}}).sort("_id", -1).limit(40))
-    if not history:
-        bot.send_message(msg.chat.id, "لا توجد فواتير مبيعات حتى الآن.")
-        return
-        
-    text = "🧾 **سجل آخر 40 فاتورة:**\n\n"
-    for t in history:
-        text += f"▪️ #{t['order_id']} | 👤 {t.get('user_name', 'بدون')} | 🛒 {t['item_name']} (x{t.get('quantity', 1)}) | 💰 {t['price']}\n"
-    bot.send_message(msg.chat.id, text, parse_mode="Markdown")
 
 # ===== GENERATE CARDS =====
 @bot.message_handler(func=lambda m: m.text == "🎫 توليد")
