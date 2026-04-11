@@ -163,7 +163,7 @@ def check_user_access(uid):
         return None
         
     return u
-
+    
 # =======================================================
 # 3. محرك معالجة الإكسيل والفواتير الديناميكية
 # =======================================================
@@ -187,22 +187,15 @@ def generate_customer_excel_file(items_data, order_id, dt_now, product_name):
     has_opcode = False
     
     for d in items_data:
-        if is_valid_val(d.get('serial')):
-            has_serial = True
-        if is_valid_val(d.get('pin')):
-            has_pin = True
-        if is_valid_val(d.get('op_code')):
-            has_opcode = True
+        if is_valid_val(d.get('serial')): has_serial = True
+        if is_valid_val(d.get('pin')): has_pin = True
+        if is_valid_val(d.get('op_code')): has_opcode = True
             
     # بناء الهيدر ديناميكياً
     headers = ["م", "اسم المنتج", "كود الشحن"]
-    
-    if has_serial:
-        headers.append("الرقم التسلسلي")
-    if has_pin:
-        headers.append("الرقم السري (PIN)")
-    if has_opcode:
-        headers.append("أوبريشن كود")
+    if has_serial: headers.append("الرقم التسلسلي")
+    if has_pin: headers.append("الرقم السري (PIN)")
+    if has_opcode: headers.append("أوبريشن كود")
         
     last_col_idx = len(headers)
     last_col_letter = get_column_letter(last_col_idx)
@@ -233,16 +226,10 @@ def generate_customer_excel_file(items_data, order_id, dt_now, product_name):
     # تعبئة البيانات
     for i, d in enumerate(items_data, 1):
         row_data = [i, product_name, d['code']]
-        
-        if has_serial:
-            row_data.append(d.get('serial', ''))
-        if has_pin:
-            row_data.append(d.get('pin', ''))
-        if has_opcode:
-            row_data.append(d.get('op_code', ''))
-            
+        if has_serial: row_data.append(d.get('serial', ''))
+        if has_pin: row_data.append(d.get('pin', ''))
+        if has_opcode: row_data.append(d.get('op_code', ''))
         ws.append(row_data)
-        
         for cell in ws[ws.max_row]:
             cell.alignment = centered
 
@@ -255,13 +242,15 @@ def generate_customer_excel_file(items_data, order_id, dt_now, product_name):
                 if cell.value:
                     if len(str(cell.value)) > max_length:
                         max_length = len(str(cell.value))
-            except Exception:
-                pass
+            except Exception: pass
         ws.column_dimensions[column].width = max_length + 5
 
     stream = io.BytesIO()
     wb.save(stream)
     stream.seek(0)
+    
+    # 👇 السطر الذي يحل المشكلة ويعرف الملف لدى تيليجرام 👇
+    stream.name = f"Invoice_{order_id}.xlsx"
     return stream
 
 def generate_admin_report_excel(report_type, history_data, summary_data=None):
@@ -279,20 +268,14 @@ def generate_admin_report_excel(report_type, history_data, summary_data=None):
         
         for h in history_data:
             ws.append([
-                h.get("order_id", "-"),
-                h.get("date", ""),
-                h.get("user_name", ""),
-                h.get("phone", ""),
-                h.get("type", ""),
-                h.get("item_name", ""),
-                h.get("quantity", 1),
-                h.get("price", h.get("amount", 0))
+                h.get("order_id", "-"), h.get("date", ""), h.get("user_name", ""),
+                h.get("phone", ""), h.get("type", ""), h.get("item_name", ""),
+                h.get("quantity", 1), h.get("price", h.get("amount", 0))
             ])
             
         if summary_data:
             ws_sum = wb.create_sheet(title="ملخص العملاء")
             ws_sum.append(["اسم العميل", "رقم الهاتف", "إجمالي المشتريات"])
-            
             for phone, data in summary_data.items():
                 ws_sum.append([data["name"], phone, data["spent"]])
 
@@ -303,22 +286,14 @@ def generate_admin_report_excel(report_type, history_data, summary_data=None):
         
         total_in = 0
         total_out = 0
-        
         for h in history_data:
             price_or_amount = h.get("price", h.get("amount", 0))
             ws.append([
-                h.get("order_id", "-"),
-                h.get("date", ""),
-                h.get("type", ""),
-                h.get("item_name", "-"),
-                h.get("quantity", "-"),
-                price_or_amount
+                h.get("order_id", "-"), h.get("date", ""), h.get("type", ""),
+                h.get("item_name", "-"), h.get("quantity", "-"), price_or_amount
             ])
-            
-            if h.get("type") == "شراء":
-                total_out += price_or_amount
-            else:
-                total_in += price_or_amount
+            if h.get("type") == "شراء": total_out += price_or_amount
+            else: total_in += price_or_amount
         
         ws.append([])
         ws.append(["", "", "", "إجمالي الإيداعات:", "", total_in])
@@ -333,76 +308,11 @@ def generate_admin_report_excel(report_type, history_data, summary_data=None):
     stream = io.BytesIO()
     wb.save(stream)
     stream.seek(0)
+    
+    # 👇 السطر الذي يحل المشكلة ويعرف الملف لدى تيليجرام 👇
+    stream.name = f"Report_{int(time.time())}.xlsx"
     return stream
 
-def generate_products_template():
-    """توليد قالب الإكسيل الفارغ لرفع المنتجات"""
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Products_Template"
-    
-    headers = [
-        "القسم", "الفئة", "الاسم", "السعر 1", "السعر 2", "السعر 3", 
-        "كود الشحن", "الرقم التسلسلي", "الرقم السري (PIN)", "اوبريشن كود"
-    ]
-    ws.append(headers)
-    
-    stream = io.BytesIO()
-    wb.save(stream)
-    stream.seek(0)
-    stream.name = "Template_Products.xlsx"
-    return stream
-
-def generate_simple_excel(data_list, title):
-    """توليد ملفات الإكسيل البسيطة (مثل تقارير الرادار للأكواد المقبولة والمرفوضة)"""
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    
-    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
-    header_font = Font(color="FFFFFF", bold=True)
-    
-    headers = [
-        "القسم", "الفئة", "الاسم", "السعر 1", "السعر 2", "السعر 3", 
-        "كود الشحن", "الرقم التسلسلي", "الرقم السري (PIN)", "اوبريشن كود"
-    ]
-    ws.append(headers)
-    
-    for col_num in range(1, len(headers) + 1):
-        cell = ws.cell(row=1, column=col_num)
-        cell.font = header_font
-        cell.fill = header_fill
-        
-    for d in data_list:
-        ws.append([
-            d.get('category', ''),
-            d.get('subcategory', ''),
-            d.get('name', ''),
-            d.get('price_1', 0),
-            d.get('price_2', 0),
-            d.get('price_3', 0),
-            d.get('code', ''),
-            d.get('serial', ''),
-            d.get('pin', ''),
-            d.get('op_code', '')
-        ])
-        
-    for col in ws.columns:
-        max_length = 0
-        column_letter = get_column_letter(col[0].column)
-        for cell in col:
-            try:
-                if cell.value:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-            except Exception:
-                pass
-        ws.column_dimensions[column_letter].width = max_length + 4
-
-    stream = io.BytesIO()
-    wb.save(stream)
-    stream.seek(0)
-    stream.name = f"{title}.xlsx"
-    return stream
 
 # =======================================================
 # 4. رادار منع التكرار (Anti-Duplicate Radar)
